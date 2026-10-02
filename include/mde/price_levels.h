@@ -10,6 +10,15 @@
 
 #include "mde/types.h"
 
+// GCC 15 reports -Wstringop-overread on vector::insert/erase here after heavy
+// inlining in some callers: it cannot prove the vector is non-empty on a path that
+// never executes. The accesses are bounds-checked by construction (and the tests
+// run clean under AddressSanitizer), so the warning is silenced for this header only.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overread"
+#endif
+
 namespace mde {
 
 struct Level {
@@ -20,7 +29,9 @@ struct Level {
 
 class PriceLevels {
 public:
-    explicit PriceLevels(Side side) : side_(side) { levels_.reserve(256); }
+    // No up-front reserve: an L3 book creates two of these for every instrument
+    // id, and most of the 65,536 ids are never used.
+    explicit PriceLevels(Side side) : side_(side) {}
 
     // Add delta (may be negative) to the level at price; removes it at zero.
     void add(Price price, Qty delta, int order_delta) {
@@ -82,3 +93,7 @@ private:
 };
 
 }  // namespace mde
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif

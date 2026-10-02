@@ -30,9 +30,11 @@ public:
         PriceLevels& side(Side s) { return s == Side::Buy ? bids : asks; }
     };
 
-    explicit L3Book(std::size_t order_capacity = std::size_t{1} << 22) : orders_(order_capacity) {
-        instruments_.resize(kMaxSymbols);
-    }
+    // Instruments are stored inline in one array indexed by symbol id: one less
+    // pointer to chase (and cache line to miss) on every event than an array of
+    // pointers.
+    explicit L3Book(std::size_t order_capacity = std::size_t{1} << 22)
+        : orders_(order_capacity), instruments_(kMaxSymbols), used_(kMaxSymbols, false) {}
 
     void on_event(const BookEvent& e) {
         ++stats_.events;
@@ -65,7 +67,9 @@ public:
     }
 
     // Instrument book, or nullptr if the symbol never had an order.
-    const Instrument* instrument(std::uint16_t symbol) const { return instruments_[symbol].get(); }
+    const Instrument* instrument(std::uint16_t symbol) const {
+        return used_[symbol] ? &instruments_[symbol] : nullptr;
+    }
     std::size_t live_orders() const { return orders_.size(); }
     const L3Stats& stats() const { return stats_; }
 
@@ -73,9 +77,8 @@ private:
     static constexpr std::size_t kMaxSymbols = 65536;
 
     Instrument& inst(std::uint16_t symbol) {
-        auto& p = instruments_[symbol];
-        if (!p) p = std::make_unique<Instrument>();
-        return *p;
+        used_[symbol] = true;
+        return instruments_[symbol];
     }
 
     void add(std::uint64_t id, std::uint16_t symbol, Side side, Price price, Qty qty) {
@@ -117,7 +120,8 @@ private:
     }
 
     OrderTable orders_;
-    std::vector<std::unique_ptr<Instrument>> instruments_;
+    std::vector<Instrument> instruments_;
+    std::vector<bool> used_;
     L3Stats stats_;
 };
 

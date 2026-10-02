@@ -9,13 +9,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        config: [release, sanitize]
+        config: [release, sanitize, scatter-hash]
     steps:
       - uses: actions/checkout@v4
       - name: Configure
         run: |
           if [ "${{ matrix.config }}" = "sanitize" ]; then
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DMDE_SANITIZE=ON
+          elif [ "${{ matrix.config }}" = "scatter-hash" ]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-DMDE_SCATTER_HASH
           else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           fi

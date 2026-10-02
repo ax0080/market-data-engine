@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -27,7 +28,35 @@ int main(int argc, char** argv) {
         std::perror(argv[1]);
         return 2;
     }
-    auto book = std::make_unique<L3Book>(std::size_t{1} << 24);
+    // Optional 2nd arg: initial order-table capacity as a power of two (default 2^24:
+    // a full day peaks near 1.7M live orders; lower load means shorter probe runs,
+    // which measured faster than a smaller, more cache-resident table).
+    const int cap_log2 = argc > 2 ? std::atoi(argv[2]) : 24;
+    // Optional 3rd arg "null": decode only, events discarded (isolates decode cost).
+    if (argc > 3 && std::string(argv[3]) == "null") {
+        struct Null {
+            std::uint64_t n = 0;
+            void on_event(const BookEvent&) { ++n; }
+        } sink;
+        auto d = std::make_unique<itch::Decoder<Null>>(sink);
+        std::vector<std::uint8_t> b(std::size_t{256} << 20);
+        std::size_t carry = 0;
+        double t = 0;
+        for (;;) {
+            const std::size_t got = std::fread(b.data() + carry, 1, b.size() - carry, f);
+            if (got == 0) break;
+            const std::size_t n = carry + got;
+            const auto t0 = Clock::now();
+            const std::size_t used = d->decode_stream(b.data(), n);
+            t += std::chrono::duration<double, std::nano>(Clock::now() - t0).count();
+            carry = n - used;
+            std::copy(b.begin() + static_cast<std::ptrdiff_t>(used), b.begin() + static_cast<std::ptrdiff_t>(n), b.begin());
+        }
+        std::printf("decode only: %llu messages, %.1f ns/message, %.1f M messages/s\n",
+                    (unsigned long long)d->stats().messages, t / d->stats().messages, d->stats().messages / t * 1e3);
+        return 0;
+    }
+    auto book = std::make_unique<L3Book>(std::size_t{1} << cap_log2);
     auto dec = std::make_unique<itch::Decoder<L3Book>>(*book);
 
     constexpr std::size_t kChunk = std::size_t{256} << 20;
