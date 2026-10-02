@@ -112,8 +112,8 @@ python tools/record_ws.py --minutes 30
 
 # NASDAQ sample day: https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/
 gzip -dc 01302019.NASDAQ_ITCH50.gz > 01302019.itch
-./build/replay_itch 01302019.itch                  # decode + L3 book (mmap)
-./build/replay_itch 01302019.itch --decode-only    # decode only; add --fread to compare with chunked reads
+./build/replay_itch 01302019.itch                  # decode + L3 book (mmap on Linux, chunked reads on Windows)
+./build/replay_itch 01302019.itch --decode-only    # decode only; --mmap / --fread to override the I/O method
 
 # network receive on loopback (Linux; AF_XDP needs root)
 sudo sh tools/xdp_local_test.sh ./build/udp_bench 01302019.itch 5000000 100000 300000 0

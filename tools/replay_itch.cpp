@@ -1,14 +1,15 @@
 // Replay a raw (decompressed) NASDAQ TotalView-ITCH 5.0 file through the decoder
 // and the L3 book.
 //
-// Input is memory-mapped by default (zero-copy: the decoder reads page-cache pages
-// in place, and the file is one contiguous range, so no message straddles a buffer
-// edge). --fread switches to classic chunked reads for comparison.
+// Input is memory-mapped by default on Linux (zero-copy: the decoder reads
+// page-cache pages in place, and the file is one contiguous range, so no message
+// straddles a buffer edge) and read in chunks by default on Windows, where that
+// measured faster. --mmap / --fread override.
 //
 // Two times are reported: "decode + book" (the decoder/book work only) and
 // "end to end" (wall clock including I/O and page faults).
 //
-// usage: replay_itch <file> [--fread] [--decode-only] [--cap <log2 capacity>]
+// usage: replay_itch <file> [--mmap|--fread] [--decode-only] [--cap <log2 capacity>]
 //        (decompress the NASDAQ sample first: gzip -dc X.gz > X)
 
 #include <algorithm>
@@ -92,13 +93,22 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string path = argv[1];
-    bool use_fread = false, decode_only = false;
+    // Default I/O per platform, from measurements on the full ITCH day: mmap removes
+    // almost all I/O cost on Linux, but on Windows every 4 KB page soft-faults and
+    // chunked reads are faster. --mmap / --fread override.
+#if defined(_WIN32)
+    bool use_fread = true;
+#else
+    bool use_fread = false;
+#endif
+    bool decode_only = false;
     // Default 2^24: a full day peaks near 1.7M live orders; lower load means shorter
     // probe runs, which measured faster than a smaller, more cache-resident table.
     int cap_log2 = 24;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--fread") use_fread = true;
+        else if (a == "--mmap") use_fread = false;
         else if (a == "--decode-only") decode_only = true;
         else if (a == "--cap" && i + 1 < argc) cap_log2 = std::atoi(argv[++i]);
     }
