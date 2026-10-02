@@ -216,6 +216,38 @@ int main(int argc, char** argv) {
     std::string storage;
     const std::vector<Line> lines = load(argv[2], storage);
     const std::string venue = argv[1];
+    // "null": decode only, events discarded -- isolates parsing cost from book cost.
+    if (argc > 3 && std::string(argv[3]) == "null") {
+        struct Null {
+            std::uint64_t n = 0;
+            void on_event(const BookEvent&) { ++n; }
+        } sink;
+        double ns = 0;
+        std::uint64_t msgs = 0;
+        auto timed = [&](auto&& f) {
+            const auto t0 = Clock::now();
+            f();
+            ns += std::chrono::duration<double, std::nano>(Clock::now() - t0).count();
+            ++msgs;
+        };
+        if (venue == "binance") {
+            binance::DepthDecoder<Null> dec(sink, 0);
+            for (const Line& l : lines) {
+                if (l.kind == 'S') {
+                    dec.on_snapshot(l.payload);
+                } else {
+                    timed([&] { dec.on_update(l.payload); });
+                }
+            }
+        } else {
+            coinbase::Level2Decoder<Null> dec(sink, 0);
+            for (const Line& l : lines)
+                if (l.kind == 'D') timed([&] { dec.on_message(l.payload); });
+        }
+        std::printf("[decode only] %s: %llu events, %.0f ns/message, %.1f ns/event\n", venue.c_str(),
+                    (unsigned long long)sink.n, ns / msgs, ns / sink.n);
+        return 0;
+    }
     // Book layout: "tick" (default, tick-grid array) or "vector" (sorted vector, for comparison).
     const bool use_vector = argc > 3 && std::string(argv[3]) == "vector";
     const Price tick = kScale / 100;   // 0.01 for BTC/ETH on both venues
