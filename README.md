@@ -52,9 +52,27 @@ The AF_XDP path is built from raw syscalls, with no libbpf, libxdp or clang: a 2
 | flood: packets/s actually received | 371 k | 349 k | **501 k (+35%)** |
 | receive syscalls per packet | 1 | 1/13 | **0** |
 
-Under flood AF_XDP took 35% more packets per second than `recvfrom`: packets are taken at the driver hook, skipping the IP/UDP stack and socket layer. This is the least favourable AF_XDP setting (WSL2 has no physical NIC, so XDP runs in generic mode and the kernel copies each packet into the shared memory). `--zc --native` enables zero-copy, driver-mode AF_XDP, where the NIC writes packets straight into the shared memory; that needs a NIC driver with AF_XDP zero-copy support and was not available here.
+Under flood AF_XDP took 35% more packets per second than `recvfrom`: packets are taken at the driver hook, skipping the IP/UDP stack and socket layer. This is the least favourable AF_XDP setting (WSL2 has no physical NIC, so XDP runs in generic mode and the kernel copies each packet into the shared memory).
 
 `recvmmsg` cut syscalls by more than 10x but did not raise throughput on loopback, where the sender and the book update, not the syscalls, were the limits.
+
+### Network receive on a real NIC: AF_XDP zero-copy (two GCP VMs)
+
+Two `n2-standard-4` VMs in one zone (asia-east1-b), gVNIC (`gve` driver), Ubuntu 24.04, kernel 7.0.0-gcp; the receiver NIC set to one RX/TX queue and the receiver pinned to a core that does not service the NIC interrupt. One VM sends the first 5 M messages of the ITCH day as fast as it can (about 440 k packets/s from one core); the other receives them and runs MoldUDP64, the ITCH decoder and the L3 book **on the same core**. Raw output and both machines' environment reports are in [`bench/gcp/`](bench/gcp/).
+
+| Receive path, full pipeline on one core | Packets/s | Messages/s | Share of the flood handled |
+|---|---|---|---|
+| `recvfrom` | 240 k | 11.3 M | 55-60% |
+| `recvmmsg` | 255 k | 12.0 M | 63-65% |
+| AF_XDP, copy, generic XDP | 333-338 k | 15.6-15.8 M | 78-82% |
+| AF_XDP, copy, driver XDP | 329-344 k | 15.0-16.1 M | 85% |
+| **AF_XDP, zero-copy, driver XDP** | **329-348 k** | **15.4-16.3 M** | **85-88%** |
+
+Ranges are two runs ([`flood_full_pinned.log`](bench/gcp/flood_full_pinned.log)). In zero-copy mode the NIC DMAs packets straight into the shared UMEM, so the kernel does no per-packet copy, socket work or syscall, and the core spends its time on decoding. The full pipeline then ran at **16.3 M msgs/s, the same as replaying the file from memory (15.7 M msgs/s)**: the cost of receiving from the network all but disappeared, and the L3 book became the only limit. Through the kernel socket path the same core managed 11.3 M msgs/s, **1.4x less**. Zero-copy was also the only path with no reordered packets in either run.
+
+With decoding switched off (`--transport`), every path took all packets: one sending core (about 440 k packets/s) is below the receive limit of all five, so the network path is only the bottleneck when it shares the core with real work ([`flood_transport_pinned.log`](bench/gcp/flood_transport_pinned.log)). The unpinned rate sweep, where the receiver sometimes shared a core with the NIC interrupt, is in [`sweep.log`](bench/gcp/sweep.log).
+
+"Late" packets in the logs arrived after a higher sequence number (reordered in the network). A production feed handler would recover them with a retransmission request; here MoldUDP64 drops them, so they count as lost messages even though the packet arrived.
 
 ### File replay: fread vs mmap
 
@@ -102,6 +120,8 @@ sudo sh tools/xdp_local_test.sh ./build/udp_bench 01302019.itch 5000000 100000 3
 # two hosts (e.g. cloud VMs): receiver first, then sender
 sudo ./build/udp_bench recv xdp --ifname eth0 --expect 5000000      # add --zc --native if the NIC supports it
 ./build/udp_bench send 01302019.itch 5000000 <receiver ip> 200000
+# the GCP runs above: SSH helper, environment report and the full sweep
+sh tools/gcp_net_bench.sh <tx public ip> <rx public ip> <rx internal ip> bench/gcp/run.log
 
 # file replay: fread vs mmap on a warm page cache
 sh tools/io_compare.sh ./build/replay_itch 01302019.itch

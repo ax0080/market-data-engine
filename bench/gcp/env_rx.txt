@@ -1,0 +1,36 @@
+== host
+mde-rx.asia-east1-b.c.project-8c5f4288-616d-4d8e-ad5.internal
+7.0.0-1011-gcp
+Ubuntu 24.04.5 LTS
+== cpu
+CPU(s):                                  4
+Model name:                              Intel(R) Xeon(R) CPU @ 2.80GHz
+BIOS Model name:                           CPU @ 2.0GHz
+Thread(s) per core:                      2
+NUMA node(s):                            1
+== nic
+driver: gve
+version: 1.0.0
+firmware-version: 
+expansion-rom-version: 
+bus-info: 0000:00:04.0
+== queues
+Channel parameters for ens4:
+Pre-set maximums:
+RX:		2
+TX:		2
+Other:		n/a
+Combined:	n/a
+Current hardware settings:
+RX:		1
+TX:		1
+Other:		n/a
+Combined:	n/a
+== link
+2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1460 qdisc mq state UP mode DEFAULT group default qlen 1000
+    link/ether 42:01:0a:8c:00:03 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 68 maxmtu 1460 addrgenmode eui64 numtxqueues 2 numrxqueues 2 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 parentbus pci parentdev 0000:00:04.0 
+    altname enp0s4
+== mtu
+1460
+== xdp features (if exposed)
+(not in sysfs)

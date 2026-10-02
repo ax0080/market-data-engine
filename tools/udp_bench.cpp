@@ -290,11 +290,14 @@ void report(const RxConfig& c, double pps, std::uint64_t expected_msgs, const Rx
     const double lost_pct = expected_msgs ? 100.0 * double(expected_msgs - m.messages) / double(expected_msgs) : 0.0;
     std::string rx = c.rx;
     if (c.rx == "xdp") rx += std::string(c.zero_copy ? "-zc" : "-copy") + (c.native ? "-drv" : "-skb");
-    std::printf("%-9s %-14s target %8.0f pkt/s | received %llu pkts, %llu msgs, %llu gaps | lost %.3f%% | "
+    // "late" = packets arriving after a higher sequence (reordered in the network).
+    // A feed handler must recover them (retransmission request); MoldUDP64 here drops
+    // them, so they show up as lost messages even though the packet was received.
+    std::printf("%-9s %-14s target %8.0f pkt/s | received %llu pkts (%llu late), %llu msgs, %llu gaps | msg loss %.3f%% | "
                 "%.2f M msgs/s, %.0f k pkts/s | %s\n",
                 c.transport_only ? "transport" : "full", rx.c_str(), pps, (unsigned long long)m.packets,
-                (unsigned long long)m.messages, (unsigned long long)m.gaps, lost_pct, m.messages / r.secs / 1e6,
-                m.packets / r.secs / 1e3,
+                (unsigned long long)m.duplicates, (unsigned long long)m.messages, (unsigned long long)m.gaps, lost_pct,
+                m.messages / r.secs / 1e6, m.packets / r.secs / 1e3,
                 c.rx == "xdp" ? "0 syscalls/packet (ring polling)"
                               : (std::to_string(double(m.packets) / double(r.syscalls)).substr(0, 5) + " pkts/syscall").c_str());
 }

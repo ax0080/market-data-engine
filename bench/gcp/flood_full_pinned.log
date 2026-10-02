@@ -1,0 +1,48 @@
+RX:		1
+TX:		1
+Other:		n/a
+Combined:	n/a
+--- recvfrom @ 0 pkt/s
+receiving on port 31007 (recvfrom)...
+sent 106797 packets, 5000000 messages in 0.25 s (431 k pkts/s)
+full      recvfrom       target        0 pkt/s | received 63564 pkts (79 late), 2979478 msgs, 90 gaps | msg loss 40.410% | 11.27 M msgs/s, 240 k pkts/s | 0.999 pkts/syscall
+--- recvmmsg @ 0 pkt/s
+receiving on port 31007 (recvmmsg)...
+sent 106797 packets, 5000000 messages in 0.26 s (417 k pkts/s)
+full      recvmmsg       target        0 pkt/s | received 68903 pkts (68 late), 3227238 msgs, 86 gaps | msg loss 35.455% | 11.96 M msgs/s, 255 k pkts/s | 57.13 pkts/syscall
+--- xdp-copy-skb @ 0 pkt/s
+receiving on port 31007 (xdp)...
+sent 106797 packets, 5000000 messages in 0.24 s (441 k pkts/s)
+full      xdp-copy-skb   target        0 pkt/s | received 82908 pkts (58 late), 3885184 msgs, 42 gaps | msg loss 22.296% | 15.59 M msgs/s, 333 k pkts/s | 0 syscalls/packet (ring polling)
+--- xdp-copy-drv @ 0 pkt/s
+receiving on port 31007 (xdp)...
+sent 106797 packets, 5000000 messages in 0.25 s (419 k pkts/s)
+full      xdp-copy-drv   target        0 pkt/s | received 90836 pkts (19 late), 4255505 msgs, 34 gaps | msg loss 14.890% | 16.11 M msgs/s, 344 k pkts/s | 0 syscalls/packet (ring polling)
+--- xdp-zc-drv @ 0 pkt/s
+receiving on port 31007 (xdp)...
+sent 106797 packets, 5000000 messages in 0.27 s (396 k pkts/s)
+full      xdp-zc-drv     target        0 pkt/s | received 90296 pkts (0 late), 4230333 msgs, 51 gaps | msg loss 15.393% | 15.43 M msgs/s, 329 k pkts/s | 0 syscalls/packet (ring polling)
+RX:		1
+TX:		1
+Other:		n/a
+Combined:	n/a
+--- recvfrom @ 0 pkt/s
+receiving on port 31007 (recvfrom)...
+sent 106797 packets, 5000000 messages in 0.23 s (467 k pkts/s)
+full      recvfrom       target        0 pkt/s | received 58612 pkts (100 late), 2746025 msgs, 75 gaps | msg loss 45.080% | 11.25 M msgs/s, 240 k pkts/s | 0.999 pkts/syscall
+--- recvmmsg @ 0 pkt/s
+receiving on port 31007 (recvmmsg)...
+sent 106797 packets, 5000000 messages in 0.25 s (423 k pkts/s)
+full      recvmmsg       target        0 pkt/s | received 67340 pkts (0 late), 3156665 msgs, 76 gaps | msg loss 36.867% | 12.01 M msgs/s, 256 k pkts/s | 46.53 pkts/syscall
+--- xdp-copy-skb @ 0 pkt/s
+receiving on port 31007 (xdp)...
+sent 106797 packets, 5000000 messages in 0.25 s (422 k pkts/s)
+full      xdp-copy-skb   target        0 pkt/s | received 87402 pkts (0 late), 4097394 msgs, 38 gaps | msg loss 18.052% | 15.84 M msgs/s, 338 k pkts/s | 0 syscalls/packet (ring polling)
+--- xdp-copy-drv @ 0 pkt/s
+receiving on port 31007 (xdp)...
+sent 106797 packets, 5000000 messages in 0.27 s (402 k pkts/s)
+full      xdp-copy-drv   target        0 pkt/s | received 91317 pkts (2374 late), 4167573 msgs, 32 gaps | msg loss 16.649% | 14.99 M msgs/s, 329 k pkts/s | 0 syscalls/packet (ring polling)
+--- xdp-zc-drv @ 0 pkt/s
+receiving on port 31007 (xdp)...
+sent 106797 packets, 5000000 messages in 0.26 s (411 k pkts/s)
+full      xdp-zc-drv     target        0 pkt/s | received 93669 pkts (0 late), 4388710 msgs, 26 gaps | msg loss 12.226% | 16.28 M msgs/s, 348 k pkts/s | 0 syscalls/packet (ring polling)
