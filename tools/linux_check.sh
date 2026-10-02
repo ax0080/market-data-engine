@@ -10,4 +10,4 @@ done
 g++ $FLAGS tests/test_main.cpp tests/test_books.cpp tests/test_feeds.cpp -o build-linux/mde_tests
 ./build-linux/mde_tests | tail -1
 python3 tools/make_synthetic_itch.py build-linux/synthetic.itch 200000
-./build-linux/udp_bench build-linux/synthetic.itch 200000 recvmmsg 100000
+./build-linux/udp_bench local build-linux/synthetic.itch 200000 recvmmsg 100000

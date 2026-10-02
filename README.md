@@ -39,16 +39,32 @@ Intel Core i5-12600K, Windows 10, g++ 15.2 `-O3 -march=native`, one thread. Timi
 
 **Where the ITCH time goes.** Decoding is 6.8 ns of the 63.5 ns. With the price-level aggregation switched off the book costs about 15 ns, so most of the rest is the per-instrument level update: each message lands on one of ~8,700 symbols, so its levels are usually not in cache. Two measured changes cut the total from 81 to 63.5 ns: an identity hash for the order table (NASDAQ order references are sequential and short-lived, so recent orders sit in neighbouring, cached slots; 81 to 65 ns), and storing instruments inline instead of behind pointers.
 
-### UDP multicast (Linux, WSL2 loopback)
+### Network receive: recvfrom vs recvmmsg vs AF_XDP (Linux, WSL2 loopback)
 
-`udp_bench` packs the first 5 M messages of the same ITCH day into MoldUDP64 packets (about 47 messages each), multicasts them on loopback, and receives them through MoldUDP64, the ITCH decoder and the L3 book.
+`udp_bench` packs the first 5 M messages of the same ITCH day into MoldUDP64 packets (about 47 messages each), sends them over loopback, and receives them through MoldUDP64, the ITCH decoder and the L3 book.
 
-| Sender rate | Full pipeline, recvfrom | Full pipeline, recvmmsg |
+The AF_XDP path is built from raw syscalls, with no libbpf, libxdp or clang: a 23-instruction XDP program, assembled in `af_xdp.h` as bytecode, redirects only UDP packets for the feed port into an AF_XDP socket and passes all other traffic to the normal stack. It is attached with `BPF_LINK_CREATE`, so it detaches when the process exits. The receiver polls the RX ring in memory shared with the kernel and recycles frames through the fill ring: no syscall per packet.
+
+| Sender rate | recvfrom | recvmmsg | AF_XDP (generic XDP, copy mode) |
+|---|---|---|---|
+| 100 k packets/s (4.7 M msgs/s) | 0 loss | 0 loss | 0 loss |
+| 300 k packets/s (14 M msgs/s) | 0 loss | 0.4% loss | 0 loss |
+| flood: packets/s actually received | 371 k | 349 k | **501 k (+35%)** |
+| receive syscalls per packet | 1 | 1/13 | **0** |
+
+Under flood AF_XDP took 35% more packets per second than `recvfrom`: packets are taken at the driver hook, skipping the IP/UDP stack and socket layer. This is the least favourable AF_XDP setting (WSL2 has no physical NIC, so XDP runs in generic mode and the kernel copies each packet into the shared memory). `--zc --native` enables zero-copy, driver-mode AF_XDP, where the NIC writes packets straight into the shared memory; that needs a NIC driver with AF_XDP zero-copy support and was not available here.
+
+`recvmmsg` cut syscalls by more than 10x but did not raise throughput on loopback, where the sender and the book update, not the syscalls, were the limits.
+
+### File replay: fread vs mmap
+
+| Full ITCH day, decode only, warm page cache | fread (256 MB chunks) | mmap |
 |---|---|---|
-| 100 k packets/s (4.7 M msgs/s) | 0 loss, 1.0 packet/syscall | 0 loss, **11.0 packets/syscall** |
-| 200 k packets/s (9.4 M msgs/s) | 0 loss, 1.0 packet/syscall | 0 loss, **11.7 packets/syscall** |
+| Linux (WSL2 ext4), end to end | 3.63 s (101 M msgs/s) | **2.44 s (151 M msgs/s)** |
+| I/O overhead on top of decoding | 1.2 s | **0.03 s** |
+| Windows 10, end to end | **4.1 s** | 4.95 s |
 
-`recvmmsg` cuts receive syscalls by roughly 11x under load. On this loopback setup that did not change throughput or loss: with no NIC in the path the sender (about 380 k packets/s) and the book update, not the syscalls, were the limits. The batching matters on a real NIC at line rate, where per-packet syscall cost dominates.
+Memory-mapping removes the kernel-to-user copy, and the file becomes one contiguous range, so no message straddles a buffer edge. On Linux that removes almost all I/O cost. On Windows it is slower: every 4 KB page takes a soft fault on first touch, and `PrefetchVirtualMemory` does not map pages into the working set (it measured slower still, so it is disabled there). Linux maps pages around each fault and honours `MADV_SEQUENTIAL` / `MADV_WILLNEED`.
 
 ## Design
 
@@ -78,11 +94,17 @@ python tools/record_ws.py --minutes 30
 
 # NASDAQ sample day: https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/
 gzip -dc 01302019.NASDAQ_ITCH50.gz > 01302019.itch
-./build/replay_itch 01302019.itch            # decode + L3 book
-./build/replay_itch 01302019.itch 24 null    # decode only
+./build/replay_itch 01302019.itch                  # decode + L3 book (mmap)
+./build/replay_itch 01302019.itch --decode-only    # decode only; add --fread to compare with chunked reads
 
-# UDP multicast on loopback (Linux): recvfrom vs recvmmsg
-sh tools/udp_sweep.sh ./build/udp_bench 01302019.itch 5000000
+# network receive on loopback (Linux; AF_XDP needs root)
+sudo sh tools/xdp_local_test.sh ./build/udp_bench 01302019.itch 5000000 100000 300000 0
+# two hosts (e.g. cloud VMs): receiver first, then sender
+sudo ./build/udp_bench recv xdp --ifname eth0 --expect 5000000      # add --zc --native if the NIC supports it
+./build/udp_bench send 01302019.itch 5000000 <receiver ip> 200000
+
+# file replay: fread vs mmap on a warm page cache
+sh tools/io_compare.sh ./build/replay_itch 01302019.itch
 # no NASDAQ file? a self-consistent synthetic stream works too (used in CI):
 python3 tools/make_synthetic_itch.py synthetic.itch 2000000
 ```
@@ -92,6 +114,7 @@ python3 tools/make_synthetic_itch.py synthetic.itch 2000000
 ```
 include/mde/   types.h  itch50.h  moldudp64.h  binance.h  coinbase.h  json_scan.h
                order_table.h  l3_book.h  price_levels.h  tick_levels.h  l2_book.h
+               mapped_file.h  af_xdp.h
 tools/         replay_itch.cpp  replay_crypto.cpp  udp_bench.cpp  record_ws.py  make_synthetic_itch.py
 tests/         check.h (tiny harness)  test_books.cpp  test_feeds.cpp
 ```

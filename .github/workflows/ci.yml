@@ -31,4 +31,5 @@ jobs:
           sudo ip link set lo multicast on
           sudo ip route add 239.0.0.0/8 dev lo || true
           python3 tools/make_synthetic_itch.py build/synthetic.itch 200000
-          ./build/udp_bench build/synthetic.itch 200000 recvmmsg 100000
+          ./build/udp_bench local build/synthetic.itch 200000 recvmmsg 100000
+          sudo ./build/udp_bench local build/synthetic.itch 200000 xdp 100000 --unicast
