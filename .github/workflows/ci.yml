@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        config: [release, sanitize]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          if [ "${{ matrix.config }}" = "sanitize" ]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DMDE_SANITIZE=ON
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: UDP loopback smoke test (synthetic ITCH)
+        if: matrix.config == 'release'
+        run: |
+          python3 tools/make_synthetic_itch.py build/synthetic.itch 200000
+          ./build/udp_bench build/synthetic.itch 200000 recvmmsg 100000
