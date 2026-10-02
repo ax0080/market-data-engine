@@ -1,0 +1,64 @@
+=== recvmmsg | rate 100000 events/s, 20s, drop every 0th packet
+exchange_sim: ITCH/MoldUDP64 -> 10.140.0.5:31007, OUCH/SoupBinTCP :31100, recovery :31101, 8 symbols
+exchange_sim: 20.0 s, 1642075 ITCH messages in 304910 packets (0 withheld by --drop), 0 replayed over TCP
+  orders: 19997 OUCH in, 956573 accepted (incl. house), 0 rejected, 573646 executions, 19999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=19997   p50    85.80  p90   115.40  p99   136.08  p99.9   219.19  max 26919.14 us
+book hash f63e44ec6ddec700 (L3 book rebuilt from the published ITCH)
+trader: recvmmsg market data on :31007, OUCH to 10.140.0.4:31100 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 304913 packets (0 duplicate, 0 malformed), messages: 1642075 live + 0 buffered + 0 recovered over TCP (0 gaps, 0 recovery sessions)
+  signals 19999 (0 skipped while catching up), orders 19997, accepted 19997, fills 19908 (1990800 shares), IOC cancels 89, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=19997   p50     0.68  p90     1.05  p99     1.64  p99.9     4.55  max    18.69 us
+  tick-to-trade (rx -> send returned) n=19997   p50     3.86  p90     4.71  p99     6.60  p99.9    20.07  max    27.19 us
+  order RTT (send -> Accepted)       n=19997   p50    84.77  p90    95.00  p99   119.79  p99.9   218.73  max 26928.43 us
+book hash f63e44ec6ddec700 (L3 book rebuilt from ITCH, complete)
+
+=== xdp-copy-skb | rate 100000 events/s, 20s, drop every 0th packet
+exchange_sim: ITCH/MoldUDP64 -> 10.140.0.5:31007, OUCH/SoupBinTCP :31100, recovery :31101, 8 symbols
+exchange_sim: 20.0 s, 1642525 ITCH messages in 292477 packets (0 withheld by --drop), 0 replayed over TCP
+  orders: 19997 OUCH in, 956763 accepted (incl. house), 0 rejected, 574186 executions, 19999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=19997   p50    81.95  p90   113.11  p99   125.87  p99.9   208.33  max 27118.66 us
+book hash b6d0bb39dbf82b0e (L3 book rebuilt from the published ITCH)
+trader: xdp market data on :31007, OUCH to 10.140.0.4:31100 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 292477 packets (0 duplicate, 0 malformed), messages: 1642525 live + 0 buffered + 0 recovered over TCP (0 gaps, 0 recovery sessions)
+  signals 19999 (0 skipped while catching up), orders 19997, accepted 19997, fills 19900 (1990000 shares), IOC cancels 97, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=19997   p50     0.35  p90     0.55  p99     1.15  p99.9     3.58  max    14.75 us
+  tick-to-trade (rx -> send returned) n=19997   p50     3.54  p90     4.46  p99     6.74  p99.9    20.58  max    67.20 us
+  order RTT (send -> Accepted)       n=19997   p50    73.57  p90    83.97  p99   102.86  p99.9   178.13  max 27190.95 us
+book hash b6d0bb39dbf82b0e (L3 book rebuilt from ITCH, complete)
+
+=== xdp-zc-drv | rate 100000 events/s, 20s, drop every 0th packet
+exchange_sim: ITCH/MoldUDP64 -> 10.140.0.5:31007, OUCH/SoupBinTCP :31100, recovery :31101, 8 symbols
+exchange_sim: 20.0 s, 1642709 ITCH messages in 301845 packets (0 withheld by --drop), 0 replayed over TCP
+  orders: 19997 OUCH in, 956603 accepted (incl. house), 0 rejected, 572858 executions, 19999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=19997   p50    89.74  p90   119.37  p99   138.62  p99.9   197.27  max  1064.51 us
+book hash 02aac9fbd1f418a8 (L3 book rebuilt from the published ITCH)
+trader: xdp market data on :31007, OUCH to 10.140.0.4:31100 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 301848 packets (0 duplicate, 0 malformed), messages: 1642709 live + 0 buffered + 0 recovered over TCP (0 gaps, 0 recovery sessions)
+  signals 19999 (0 skipped while catching up), orders 19997, accepted 19997, fills 19902 (1990200 shares), IOC cancels 95, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=19997   p50     0.77  p90     1.17  p99     1.83  p99.9     4.98  max    15.38 us
+  tick-to-trade (rx -> send returned) n=19997   p50     4.00  p90     4.97  p99     7.35  p99.9    21.87  max    28.39 us
+  order RTT (send -> Accepted)       n=19997   p50    90.57  p90   100.09  p99   125.43  p99.9   197.44  max   447.10 us
+book hash 02aac9fbd1f418a8 (L3 book rebuilt from ITCH, complete)
+
+=== recvmmsg-gap-recovery | rate 100000 events/s, 20s, drop every 50th packet
+exchange_sim: ITCH/MoldUDP64 -> 10.140.0.5:31007, OUCH/SoupBinTCP :31100, recovery :31101, 8 symbols
+exchange_sim: 20.0 s, 1640202 ITCH messages in 289593 packets (5791 withheld by --drop), 203593 replayed over TCP
+  orders: 17713 OUCH in, 953957 accepted (incl. house), 0 rejected, 567994 executions, 19999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=17713   p50   103.91  p90   290.26  p99   532.53  p99.9   661.51  max  5405.49 us
+book hash bf15a6a00f9e3dba (L3 book rebuilt from the published ITCH)
+trader: recvmmsg market data on :31007, OUCH to 10.140.0.4:31100 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 283804 packets (0 duplicate, 0 malformed), messages: 1507620 live + 99938 buffered + 32644 recovered over TCP (5791 gaps, 5791 recovery sessions)
+  signals 19999 (2286 skipped while catching up), orders 17713, accepted 17713, fills 17638 (1763800 shares), IOC cancels 75, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=17713   p50     0.85  p90     1.42  p99     2.08  p99.9     4.93  max    25.57 us
+  tick-to-trade (rx -> send returned) n=17713   p50     4.42  p90     5.66  p99     7.32  p99.9    14.51  max    90.87 us
+  order RTT (send -> Accepted)       n=17713   p50    81.14  p90   287.99  p99   532.34  p99.9   668.05  max  5417.73 us
+book hash bf15a6a00f9e3dba (L3 book rebuilt from ITCH, complete)
+

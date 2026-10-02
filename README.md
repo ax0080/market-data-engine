@@ -2,6 +2,8 @@
 
 A C++20 market-data feed handler that decodes **NASDAQ TotalView-ITCH 5.0**, **Binance** and **Coinbase** order-book feeds into one venue-neutral event stream and rebuilds the order book: order-by-order (L3) for ITCH, price-level (L2) for the crypto venues.
 
+It also covers the trading side of the NASDAQ protocol stack: **UDP market data with TCP gap recovery** (MoldUDP64 + SoupBinTCP), **OUCH 5.0 order entry**, and an exchange simulator around the [orderbook-engine](https://github.com/ax0080/orderbook-engine) matching engine, so the full tick-to-trade path (packet in, book update, decision, order out) runs and is measured between two cloud VMs.
+
 Companion projects: a [matching engine](https://github.com/ax0080/orderbook-engine) and a [backtest engine](https://github.com/ax0080/backtest-engine).
 
 ```
@@ -9,8 +11,14 @@ Companion projects: a [matching engine](https://github.com/ax0080/orderbook-engi
  ─────────────          ──────────────────────────            ──────────────        ─────────────────
  file replay      ──►   ITCH 5.0 (binary, zero-copy)   ──┐                          L3: order table +
  UDP multicast    ──►   MoldUDP64 framing + sequencing   ├──►    BookEvent    ──►      price levels
- (recvmmsg)             Binance diff-depth (JSON)      ──┤   (compile-time sink)    L2: tick-grid levels
+ (recvmmsg/AF_XDP)      Binance diff-depth (JSON)      ──┤   (compile-time sink)    L2: tick-grid levels
  recorded WS      ──►   Coinbase level2 (JSON)         ──┘                          gap / resync checks
+
+ tick to trade (tools/trader.cpp, one core)                    exchange simulator (sim/)
+ ──────────────────────────────────────────                    ─────────────────────────────────────
+ UDP  ITCH/MoldUDP64 ─► GapFiller ─► ITCH ─► L3 book ─► rule ◄── ITCH publisher ◄─┐
+ TCP  SoupBinTCP replay ──┘ (only while a gap is open)        ◄── replay log       ├─ orderbook-engine
+ TCP  OUCH 5.0 order ─────────────────────────────────────────►  OUCH gateway ─────┘   (matching)
 ```
 
 ## Results
@@ -24,6 +32,8 @@ Intel Core i5-12600K, Windows 10, g++ 15.2 `-O3 -march=native`, one thread. Timi
 | NASDAQ ITCH 5.0 | full trading day, 30 Jan 2019: 11.25 GB, **368.4 M messages** | every execute / cancel / delete / replace must find a live order | **0 unknown-order events**, 0 duplicate adds; the book is empty after the close, as it should be |
 | Binance BTCUSDT, ETHUSDT | 29 min live diff-depth stream each (~510 k / 410 k level updates) | rebuilt book against **independent REST snapshots**, level by level, top 1,000 levels per side | **10,000 levels compared per symbol, 0 mismatches**, 0 sequence gaps |
 | Coinbase BTC-USD, ETH-USD | 29 min live level2 stream each (~30 k messages) | sequence continuity, book never crossed | 0 gaps, 0 crossed states |
+| UDP feed with TCP gap recovery | exchange simulator, 1.6 M ITCH messages per 20 s run, every 50th UDP packet withheld | trader's L3 book vs the book the exchange published (hash of every level) | **~6,000 gaps per run, all filled over SoupBinTCP; books identical** (two GCP VMs and CI loopback) |
+| Exchange gateway | 20,000 random OUCH enter / replace / cancel and house orders against the real matching engine | after every operation: L3 book rebuilt from the published ITCH vs the engine's book; each client's open quantity from OUCH replies vs the engine | **identical at every step** |
 
 ### Performance
 
@@ -72,7 +82,26 @@ Ranges are two runs ([`flood_full_pinned.log`](bench/gcp/flood_full_pinned.log))
 
 With decoding switched off (`--transport`), every path took all packets: one sending core (about 440 k packets/s) is below the receive limit of all five, so the network path is only the bottleneck when it shares the core with real work ([`flood_transport_pinned.log`](bench/gcp/flood_transport_pinned.log)). The unpinned rate sweep, where the receiver sometimes shared a core with the NIC interrupt, is in [`sweep.log`](bench/gcp/sweep.log).
 
-"Late" packets in the logs arrived after a higher sequence number (reordered in the network). A production feed handler would recover them with a retransmission request; here MoldUDP64 drops them, so they count as lost messages even though the packet arrived.
+"Late" packets in the logs arrived after a higher sequence number (reordered in the network). `udp_bench` uses the counting MoldUDP64 decoder, which drops them, so they count as lost messages even though the packet arrived; the trader below uses `GapFiller`, which holds later packets and fills the hole over TCP instead.
+
+### Tick to trade: UDP market data in, OUCH order out (two GCP VMs)
+
+The same two-VM setup (`n2-standard-4`, gVNIC, one RX queue on the trader, each program pinned to one core). `exchange_sim` on one VM runs the matching engine and publishes ITCH over UDP at about 82 k messages/s across 8 symbols. Every millisecond it adds a 5,000-share bid; `trader` on the other VM reacts by buying 100 shares IOC at the best ask, sending the OUCH order from inside the decode callback of the packet that carried the signal. 20,000 orders per run; ranges are two runs ([`t2t_run1.log`](bench/gcp/t2t_run1.log), [`t2t_run2.log`](bench/gcp/t2t_run2.log)).
+
+| Market-data receive | Tick-to-trade in the trader, p50 / p99 / p99.9 | Order round trip, p50 | Trigger sent -> order received, at the exchange, p50 / p99 |
+|---|---|---|---|
+| `recvmmsg` | 0.68-0.69 / 1.64-1.85 / 4.6-5.1 µs | 70-85 µs | 74-86 / 135-136 µs |
+| **AF_XDP, copy, generic XDP** | **0.35-0.36 / 1.15-1.17 / 3.6 µs** | 70-74 µs | 72-82 / 117-126 µs |
+| AF_XDP, zero-copy, driver XDP | 0.75-0.77 / 1.74-1.83 / 5.0-5.5 µs | 87-91 µs | 90-95 / 139-145 µs |
+| `recvmmsg`, every 50th packet withheld | 0.85-0.92 / 2.1-5.1 / 4.9-7.0 µs | 71-81 µs | 73-104 / 119-533 µs |
+
+- **Tick-to-trade in the trader** runs from the receive call returning the packet's batch to the OUCH order being handed to `send()`: MoldUDP64 sequencing, ITCH decode, L3 book update, the rule, and encoding the SoupBinTCP + OUCH message. It is stamped once per receive batch on every path, so a packet queued behind others in the same batch carries their processing time.
+- **Trigger sent -> order received** is measured by the exchange: the trigger packet is stamped just before `sendto()` and the order just after `recv()`, both on the exchange's clock, so no clock synchronisation is involved. It covers two network hops plus the trader.
+- **The network dominates.** The virtual network's round trip (about 70 µs) is about 200 times the trader's own processing, so the receive method moves in-process latency by tenths of a microsecond but barely moves what the exchange sees. On colocated hardware with kernel-bypass NICs the wire time shrinks to single-digit microseconds and the in-process part starts to matter.
+- **Copy-mode AF_XDP was the fastest receive path here, ahead of zero-copy.** Our likely explanation (not verified with counters): in zero-copy mode the NIC writes frames into memory the CPU has not touched, so the decoder's first reads miss the cache; in copy mode the kernel's copy has just brought the data into cache. The flood test above favoured zero-copy because there the per-packet kernel work, not cache misses, was the limit.
+- **Gap recovery.** With every 50th packet withheld the trader logged about 6,000 gaps per run, filled each from the exchange's SoupBinTCP replay, and still ended with exactly the exchange's book. Signals that arrive while a gap is open are not traded, because the book is behind. The recovery connection is opened per gap, which costs a TCP handshake each time; that shows in the exchange-observed tail of the second run (p99 533 µs).
+
+On WSL2 loopback, where both programs share one machine, tick-to-trade in the trader is 0.29-0.30 µs p50, and trigger -> order at the exchange is 3.6-4.1 µs p50.
 
 ### File replay: fread vs mmap
 
@@ -98,11 +127,31 @@ Memory-mapping removes the kernel-to-user copy, and the file becomes one contigu
 
 **Sequencing.** Binance follows the documented sync: buffer the stream, take a REST snapshot, drop updates already in it, require `U <= lastUpdateId + 1 <= u` for the first one and `U == previous u + 1` afterwards; a hole marks the book unsynced until the next snapshot. Coinbase checks that `sequence_num` advances by one per message. MoldUDP64 detects gaps (and counts lost messages) and drops duplicates from a redundant feed.
 
+**UDP with TCP recovery.** `GapFiller` delivers MoldUDP64 messages strictly in sequence. When a packet arrives ahead of the next expected number it stops delivering, holds that packet and every later one, and reports the missing range. The trader then opens a SoupBinTCP session to the exchange's replay port, logs in with the first missing sequence number, feeds the replayed messages in, and logs out as soon as the hole is filled; the held packets are then replayed and live delivery resumes. Packets that partly overlap what was already delivered are trimmed, and MoldUDP64 heartbeats and End of Session carry the next sequence number, so a gap at the very end of the feed is found too. The normal path stays zero-copy; packets are copied only while a gap is open.
+
+**SoupBinTCP.** NASDAQ's session layer over TCP: a 2-byte length, a type byte, and a payload. TCP may split a logical packet across reads or put several in one, so `soup::Framer` reassembles them in place and only moves an incomplete tail to the front of its buffer. Login carries the next sequence number the client wants, so after a reconnect the server resumes exactly where the client stopped; heartbeats in both directions detect a dead link.
+
+**OUCH 5.0.** Field offsets follow NASDAQ's specification (big-endian binary, 8-byte prices with 4 implied decimals, space-padded alpha fields), and the tests check the layout byte by byte. Orders are named by the client's UserRefNum, which must strictly increase, so a resent message is recognised and ignored; Replace re-states the total quantity liable for the whole order chain, and Cancel gives the new intended order size (0 cancels; the simulator treats it as the new open quantity).
+
+**Exchange gateway.** `sim/gateway.h` puts the matching engine behind both protocols. Every book change becomes an ITCH message for everyone and an OUCH reply for the order's owner. ITCH only shows resting orders: an order that trades on arrival produces Executed messages against the orders it hit and an Add Order for whatever rests; a reprice is published as Delete + Add under a new reference, and a size reduction as a Cancel that keeps priority. The engine reports events after each operation finishes, so anything the OUCH reply must state as of a replace (the quantity outstanding at that moment) is captured before the call.
+
+**Tick to trade on one core.** The trader busy-polls the UDP socket (or the AF_XDP ring) and decides inside the decode callback: on a signal it builds the SoupBinTCP + OUCH order in a stack buffer and calls `send()` on a `TCP_NODELAY` socket, with no queue or thread hop. Order-entry and recovery sockets are polled every 16th iteration, since they are not on the hot path.
+
 ## Build and run
 
 ```sh
-cmake -S . -B build -G Ninja && cmake --build build
-./build/mde_tests
+cmake -S . -B build -G Ninja && cmake --build build   # fetches orderbook-engine at a pinned commit
+                                                      # (or -DMDE_ORDERBOOK_DIR=<local checkout>)
+./build/mde_tests && ./build/mde_sim_tests
+
+# tick to trade on one Linux host: exchange_sim + trader, checks the trader's book equals the exchange's
+sh tools/t2t_local.sh build
+DROP=20 sh tools/t2t_local.sh build                    # withhold every 20th UDP packet: TCP gap recovery
+# two hosts: exchange first, then the trader (add --rx xdp [--native --zc] and sudo for AF_XDP)
+./build/exchange_sim --md-dest <trader ip> --duration 20
+./build/trader --exchange <exchange ip> --rx recvmmsg
+# the GCP runs above
+sh tools/gcp_t2t_bench.sh <exchange public ip> <exchange internal ip> <trader public ip> <trader internal ip> bench/gcp/t2t.log
 
 # record 30 minutes of public Binance and Coinbase data (no API key needed)
 python tools/record_ws.py --minutes 30
@@ -135,6 +184,8 @@ python3 tools/make_synthetic_itch.py synthetic.itch 2000000
 include/mde/   types.h  itch50.h  moldudp64.h  binance.h  coinbase.h  json_scan.h
                order_table.h  l3_book.h  price_levels.h  tick_levels.h  l2_book.h
                mapped_file.h  af_xdp.h
-tools/         replay_itch.cpp  replay_crypto.cpp  udp_bench.cpp  record_ws.py  make_synthetic_itch.py
-tests/         check.h (tiny harness)  test_books.cpp  test_feeds.cpp
+               wire.h  soupbintcp.h  ouch50.h  itch50_writer.h  gap_filler.h  book_hash.h  linux_net.h
+sim/           gateway.h (matching engine -> ITCH + OUCH)  exchange_sim.cpp
+tools/         replay_itch.cpp  replay_crypto.cpp  udp_bench.cpp  trader.cpp  record_ws.py  make_synthetic_itch.py
+tests/         check.h (tiny harness)  test_books.cpp  test_feeds.cpp  test_order_entry.cpp  test_gateway.cpp
 ```
