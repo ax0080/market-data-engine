@@ -1,0 +1,24 @@
+# WSL2 Ubuntu 24.04, i5-12600K, g++ -O3 -march=native, pinned to one core (taskset -c 3), two runs
+order-entry codec, 2000000 iterations, median of 5 runs (ns per message)
+                                       OUCH 5.0    FIX 4.4  FIX/OUCH
+new order: encode (client)                  1.5       49.1       32x
+new order: decode (exchange)                2.7       88.6       33x
+execution report: encode (exchange)         1.2       63.2       53x
+execution report: decode (client)           1.2      123.9      105x
+all four, codec only                        6.6      324.8       49x
+(FIX decode above is a single scan with a switch on the tag; splitting into
+ fields and looking each one up by tag: new order 100.6 ns, execution report 135.1 ns)
+new order on the wire                        50        156   bytes
+execution report on the wire                 39        215   bytes
+
+order-entry codec, 2000000 iterations, median of 5 runs (ns per message)
+                                       OUCH 5.0    FIX 4.4  FIX/OUCH
+new order: encode (client)                  1.5       48.4       32x
+new order: decode (exchange)                2.7       83.3       31x
+execution report: encode (exchange)         1.2       65.5       55x
+execution report: decode (client)           1.2      114.9       98x
+all four, codec only                        6.5      312.2       48x
+(FIX decode above is a single scan with a switch on the tag; splitting into
+ fields and looking each one up by tag: new order 92.4 ns, execution report 125.7 ns)
+new order on the wire                        50        156   bytes
+execution report on the wire                 39        215   bytes

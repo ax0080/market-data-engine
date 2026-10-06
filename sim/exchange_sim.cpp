@@ -4,6 +4,7 @@
 //   market data   ITCH 5.0 in MoldUDP64 packets over UDP (unicast or multicast)
 //   recovery      SoupBinTCP replay of the same ITCH stream from any sequence number
 //   order entry   OUCH 5.0 over SoupBinTCP, one account per login username
+//                 FIX 4.4 over TCP (sim/fix_order_entry.h), one account per SenderCompID
 //
 // Simulated market flow ("house" orders) keeps the books moving: passive limit
 // orders, cancels, and marketable IOC orders around a drifting mid price.
@@ -17,7 +18,7 @@
 // forcing the trader through gap recovery over TCP.
 //
 // usage: exchange_sim [--md-dest 127.0.0.1] [--md-port 31007] [--oe-port 31100]
-//                     [--rec-port 31101] [--rate 100000] [--trigger-us 1000]
+//                     [--rec-port 31101] [--fix-port 31102] [--rate 100000] [--trigger-us 1000]
 //                     [--duration 10] [--drop 0] [--flush-us 50] [--cpu -1]
 //                     [--symbols AAPL,MSFT,...] [--no-wait]
 
@@ -41,8 +42,10 @@ int main() {
 #include <unordered_map>
 #include <vector>
 
+#include "fix_order_entry.h"
 #include "gateway.h"
 #include "mde/book_hash.h"
+#include "mde/fix44.h"
 #include "mde/itch50.h"
 #include "mde/itch50_writer.h"
 #include "mde/l3_book.h"
@@ -59,7 +62,7 @@ constexpr std::uint64_t kSecond = 1'000'000'000;
 
 struct Config {
     std::string md_dest = "127.0.0.1";
-    std::uint16_t md_port = 31007, oe_port = 31100, rec_port = 31101;
+    std::uint16_t md_port = 31007, oe_port = 31100, rec_port = 31101, fix_port = 31102;
     double rate = 100'000;          // house events per second, all symbols
     std::uint64_t trigger_us = 1000;
     std::uint32_t trigger_qty = 5000;
@@ -92,6 +95,11 @@ struct Client {
     std::uint64_t pos = 0;      // next log index to send
 };
 
+struct FixClient {
+    net::FixConn conn;
+    int account = -1;           // set by the first Logon
+};
+
 class Exchange {
 public:
     explicit Exchange(const Config& c)
@@ -105,6 +113,7 @@ public:
         }
         oe_listen_ = net::tcp_listen(c.oe_port);
         rec_listen_ = net::tcp_listen(c.rec_port);
+        fix_listen_ = net::tcp_listen(c.fix_port);
     }
 
     // ---- Gateway output ----
@@ -116,15 +125,20 @@ public:
         pb_.append(m, len);
     }
     void oe(int s, const std::uint8_t* m, std::size_t len) {
-        accounts_[static_cast<std::size_t>(s)].log.append(m, len);
+        Account& acct = accounts_[static_cast<std::size_t>(s)];
+        if (acct.fix) {   // FIX account: the OUCH reply becomes an ExecutionReport
+            acct.fix->on_ouch(m, len, net::epoch_ns(), fix_sender(s));
+            return;
+        }
+        acct.log.append(m, len);
         for (auto& cl : clients_)
             if (cl->kind == Client::OrderEntry && cl->account == s) pump(*cl);
     }
     std::uint64_t now_ns() { return net::ns_since_midnight(); }
 
     int run() {
-        std::printf("exchange_sim: ITCH/MoldUDP64 -> %s:%u, OUCH/SoupBinTCP :%u, recovery :%u, %zu symbols\n",
-                    c_.md_dest.c_str(), c_.md_port, c_.oe_port, c_.rec_port, c_.symbols.size());
+        std::printf("exchange_sim: ITCH/MoldUDP64 -> %s:%u, OUCH/SoupBinTCP :%u, FIX 4.4 :%u, recovery :%u, %zu symbols\n",
+                    c_.md_dest.c_str(), c_.md_port, c_.oe_port, c_.fix_port, c_.rec_port, c_.symbols.size());
         std::fflush(stdout);
         net::pin_cpu(c_.cpu);
         if (c_.wait_client) {
@@ -169,7 +183,7 @@ public:
                    reinterpret_cast<const sockaddr*>(&md_dst_), sizeof md_dst_);
         }
         const std::uint64_t linger_end = net::mono_ns() + 5 * kSecond;
-        while (net::mono_ns() < linger_end && !clients_.empty()) service(net::mono_ns());
+        while (net::mono_ns() < linger_end && (!clients_.empty() || !fix_clients_.empty())) service(net::mono_ns());
         report(double(now - t0) / 1e9);
         return 0;
     }
@@ -184,7 +198,9 @@ private:
     };
     struct Account {
         std::string user;
-        MsgLog log;
+        MsgLog log;                                   // OUCH: sequenced output for SoupBinTCP
+        std::unique_ptr<sim::FixOrderEntry> fix;      // FIX: order state and ExecutionReports
+        std::unique_ptr<fix::Session> session;        // FIX: sequence numbers and resend
     };
 
     static constexpr std::uint32_t kTick = 100;   // $0.01
@@ -255,6 +271,28 @@ private:
     void service(std::uint64_t now) {
         accept_new(oe_listen_, Client::OrderEntry);
         accept_new(rec_listen_, Client::Recovery);
+        if (const int fd = accept(fix_listen_, nullptr, nullptr); fd >= 0) {
+            net::tune_tcp(fd);
+            fix_clients_.push_back(std::make_unique<FixClient>(FixClient{net::FixConn(fd)}));
+        }
+        for (std::size_t i = 0; i < fix_clients_.size(); ++i) {
+            FixClient& cl = *fix_clients_[i];
+            const bool alive = cl.conn.read();
+            const std::uint64_t t_rx = cl.conn.last_rx_ns;
+            cl.conn.in().drain([&](const std::uint8_t* p, std::size_t n) {
+                fix_message(cl, p, n, t_rx);
+                return cl.conn.open();
+            });
+            if (!alive || !cl.conn.open() || !cl.conn.flush()) {
+                fix_clients_.erase(fix_clients_.begin() + static_cast<std::ptrdiff_t>(i--));
+                continue;
+            }
+            if (cl.account >= 0) {
+                fix::Session& ss = *accounts_[static_cast<std::size_t>(cl.account)].session;
+                ss.tick(net::epoch_ns(), net::epoch_ns() - (now - cl.conn.last_tx_ns),
+                        [&](const std::uint8_t* p, std::size_t n) { cl.conn.send(p, n); });
+            }
+        }
         for (std::size_t i = 0; i < clients_.size(); ++i) {
             Client& cl = *clients_[i];
             const bool alive = cl.conn.read();
@@ -313,9 +351,9 @@ private:
         if (cl.kind == Client::OrderEntry) {
             int a = -1;
             for (std::size_t i = 0; i < accounts_.size(); ++i)
-                if (accounts_[i].user == r.user) a = static_cast<int>(i);
+                if (accounts_[i].user == r.user && !accounts_[i].fix) a = static_cast<int>(i);
             if (a < 0) {
-                accounts_.push_back(Account{std::string(r.user), {}});
+                accounts_.push_back(Account{std::string(r.user), {}, nullptr, nullptr});
                 a = static_cast<int>(accounts_.size() - 1);
             }
             cl.account = a;
@@ -353,7 +391,70 @@ private:
     std::size_t logged_in_oe() const {
         std::size_t n = 0;
         for (const auto& cl : clients_) n += cl->kind == Client::OrderEntry && cl->logged_in;
+        for (const auto& cl : fix_clients_)
+            n += cl->account >= 0 && accounts_[static_cast<std::size_t>(cl->account)].session->logged_on();
         return n;
+    }
+
+    // ---- FIX ----
+    // Replies for FIX account a: built by its session (sequence number, kept for
+    // resend) and sent to its connection, if one is up.
+    struct FixSender {
+        Exchange* ex;
+        int a;
+        template <class Fill>
+        void operator()(char type, Fill&& fill) const {
+            Account& acct = ex->accounts_[static_cast<std::size_t>(a)];
+            const auto m = acct.session->build(type, net::epoch_ns(), fill);
+            for (auto& cl : ex->fix_clients_)
+                if (cl->account == a && m.first) cl->conn.send(m.first, m.second);
+        }
+    };
+    FixSender fix_sender(int a) { return FixSender{this, a}; }
+
+    struct FixApp {
+        Exchange& ex;
+        int account;
+        std::uint64_t t_rx;
+        void on_app(const fix::Message& m) { ex.fix_request(account, m, t_rx); }
+    };
+
+    void fix_message(FixClient& cl, const std::uint8_t* p, std::size_t n, std::uint64_t t_rx) {
+        if (cl.account < 0) {   // first message must be a Logon; SenderCompID names the account
+            fix::Message m;
+            if (!m.parse(p, n) || m.type() != 'A') {
+                cl.conn.close();
+                return;
+            }
+            const std::string comp(m.get(fix::tag::SenderCompID));
+            int a = -1;
+            for (std::size_t i = 0; i < accounts_.size(); ++i)
+                if (accounts_[i].fix && accounts_[i].user == comp) a = static_cast<int>(i);
+            if (a < 0) {
+                accounts_.push_back(Account{comp, {}, nullptr, nullptr});
+                a = static_cast<int>(accounts_.size() - 1);
+                accounts_.back().fix = std::make_unique<sim::FixOrderEntry>(a);
+                accounts_.back().session = std::make_unique<fix::Session>("MDESIM", comp, true);
+            }
+            cl.account = a;
+        }
+        FixApp app{*this, cl.account, t_rx};
+        accounts_[static_cast<std::size_t>(cl.account)].session->on_message(
+            p, n, net::epoch_ns(), app, [&](const std::uint8_t* q, std::size_t k) { cl.conn.send(q, k); });
+    }
+
+    void fix_request(int account, const fix::Message& m, std::uint64_t t_rx) {
+        if (m.type() == 'D') {
+            const std::string_view id = m.get(fix::tag::ClOrdID);
+            if (id.size() > 1 && id[0] == 'T') {   // reaction to a trigger
+                const std::uint64_t seq = fix::parse_uint(id.substr(1));
+                const auto it = trigger_sent_.find(seq);
+                if (it != trigger_sent_.end() && t_rx >= it->second) reaction_.add(t_rx - it->second);
+            }
+            ++orders_in_;
+            ++fix_orders_in_;
+        }
+        accounts_[static_cast<std::size_t>(account)].fix->on_request(m, gw_, net::epoch_ns(), fix_sender(account));
     }
 
 public:
@@ -376,8 +477,9 @@ private:
         std::printf("exchange_sim: %.1f s, %llu ITCH messages in %llu packets (%llu withheld by --drop), %llu replayed over TCP\n",
                     secs, (unsigned long long)log_.count(), (unsigned long long)md_packets_,
                     (unsigned long long)md_dropped_, (unsigned long long)replayed_);
-        std::printf("  orders: %llu OUCH in, %llu accepted (incl. house), %llu rejected, %llu executions, %llu triggers sent\n",
-                    (unsigned long long)orders_in_, (unsigned long long)g.accepted, (unsigned long long)g.rejected,
+        std::printf("  orders: %llu in (%llu OUCH, %llu FIX), %llu accepted (incl. house), %llu rejected, %llu executions, %llu triggers sent\n",
+                    (unsigned long long)orders_in_, (unsigned long long)(orders_in_ - fix_orders_in_),
+                    (unsigned long long)fix_orders_in_, (unsigned long long)g.accepted, (unsigned long long)g.rejected,
                     (unsigned long long)g.executions, (unsigned long long)triggers_);
         std::printf("  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):\n");
         reaction_.print("trigger -> order at exchange");
@@ -385,7 +487,7 @@ private:
     }
 
     Config c_;
-    int md_fd_ = -1, oe_listen_ = -1, rec_listen_ = -1;
+    int md_fd_ = -1, oe_listen_ = -1, rec_listen_ = -1, fix_listen_ = -1;
     sockaddr_in md_dst_{};
     mold::PacketBuilder pb_;
     MsgLog log_;
@@ -395,12 +497,13 @@ private:
     std::vector<Book> books_;
     std::vector<Account> accounts_;
     std::vector<std::unique_ptr<Client>> clients_;
+    std::vector<std::unique_ptr<FixClient>> fix_clients_;
     Client* inbound_ = nullptr;
     std::uint64_t rx_ns_ = 0;
     std::uint64_t pkt_start_ns_ = 0, last_md_ns_ = 0;
     std::uint64_t trigger_seq_ = 0, triggers_ = 0;
     std::unordered_map<std::uint64_t, std::uint64_t> trigger_sent_;   // ITCH sequence -> send time
-    std::uint64_t md_packets_ = 0, md_dropped_ = 0, replayed_ = 0, orders_in_ = 0;
+    std::uint64_t md_packets_ = 0, md_dropped_ = 0, replayed_ = 0, orders_in_ = 0, fix_orders_in_ = 0;
     net::Samples reaction_;
 };
 
@@ -415,6 +518,7 @@ int main(int argc, char** argv) {
         else if (a == "--md-port") c.md_port = static_cast<std::uint16_t>(std::atoi(next().c_str()));
         else if (a == "--oe-port") c.oe_port = static_cast<std::uint16_t>(std::atoi(next().c_str()));
         else if (a == "--rec-port") c.rec_port = static_cast<std::uint16_t>(std::atoi(next().c_str()));
+        else if (a == "--fix-port") c.fix_port = static_cast<std::uint16_t>(std::atoi(next().c_str()));
         else if (a == "--rate") c.rate = std::atof(next().c_str());
         else if (a == "--trigger-us") c.trigger_us = std::strtoull(next().c_str(), nullptr, 10);
         else if (a == "--trigger-qty") c.trigger_qty = static_cast<std::uint32_t>(std::atoi(next().c_str()));

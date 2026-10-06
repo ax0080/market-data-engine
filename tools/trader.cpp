@@ -2,7 +2,7 @@
 //
 //   UDP  ITCH 5.0 / MoldUDP64 -> GapFiller -> ITCH decoder -> L3 book -> rule -> OUCH order
 //   TCP  SoupBinTCP replay to fill any gap the UDP feed had (connects only while needed)
-//   TCP  OUCH 5.0 order entry over SoupBinTCP
+//   TCP  OUCH 5.0 order entry over SoupBinTCP, or FIX 4.4 (--oe fix)
 //
 // Rule: when a bid of at least --threshold shares is added to the book, buy
 // --qty shares IOC at the current best ask. The order is encoded and sent from
@@ -12,12 +12,12 @@
 //
 // Measured on this host (CLOCK_MONOTONIC):
 //   tick-to-trade   receive call returned the packet -> order handed to send()
-//   order RTT       send() -> OUCH Accepted received
+//   order RTT       send() -> order accepted (OUCH Accepted / FIX ExecutionReport ExecType=New)
 // The exchange simulator separately measures trigger sendto() -> order recv().
 //
 // usage: trader [--exchange 127.0.0.1] [--md-port 31007] [--oe-port 31100] [--rec-port 31101]
 //               [--rx recvmmsg|recvfrom|xdp] [--ifname eth0] [--zc] [--native] [--group 239.x.x.x]
-//               [--threshold 5000] [--qty 100] [--cpu -1] [--user TRADER]
+//               [--threshold 5000] [--qty 100] [--cpu -1] [--user TRADER] [--oe ouch|fix] [--fix-port 31102]
 
 #if !defined(__linux__)
 #include <cstdio>
@@ -34,10 +34,12 @@ int main() {
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "mde/af_xdp.h"
 #include "mde/book_hash.h"
+#include "mde/fix44.h"
 #include "mde/gap_filler.h"
 #include "mde/itch50.h"
 #include "mde/itch50_writer.h"
@@ -55,7 +57,8 @@ constexpr unsigned kBatch = 64;
 
 struct Config {
     std::string exchange = "127.0.0.1";
-    std::uint16_t md_port = 31007, oe_port = 31100, rec_port = 31101;
+    std::uint16_t md_port = 31007, oe_port = 31100, rec_port = 31101, fix_port = 31102;
+    std::string oe = "ouch";
     std::string rx = "recvmmsg";
     std::string ifname = "eth0";
     bool zc = false, native = false;
@@ -90,11 +93,19 @@ public:
         } else {
             md_fd_ = net::udp_receiver(c_.md_port, c_.group);
         }
-        oe_ = std::make_unique<net::Conn>(net::tcp_connect(c_.exchange, c_.oe_port));
-        std::uint8_t login[soup::kLoginRequestLen];
-        oe_->send(login, soup::put_login_request(login, c_.user, "pass", "", 1));
-        std::printf("trader: %s market data on :%u, OUCH to %s:%u (rule: bid >= %u shares -> buy %u IOC at best ask)\n",
-                    c_.rx.c_str(), c_.md_port, c_.exchange.c_str(), c_.oe_port, c_.threshold, c_.qty);
+        if (fix_) {
+            fix_conn_ = std::make_unique<net::FixConn>(net::tcp_connect(c_.exchange, c_.fix_port));
+            fix_session_ = std::make_unique<fix::Session>(c_.user, "MDESIM", false);
+            const auto m = fix_session_->logon(net::epoch_ns());
+            fix_conn_->send(m.first, m.second);
+        } else {
+            oe_ = std::make_unique<net::Conn>(net::tcp_connect(c_.exchange, c_.oe_port));
+            std::uint8_t login[soup::kLoginRequestLen];
+            oe_->send(login, soup::put_login_request(login, c_.user, "pass", "", 1));
+        }
+        std::printf("trader: %s market data on :%u, %s to %s:%u (rule: bid >= %u shares -> buy %u IOC at best ask)\n",
+                    c_.rx.c_str(), c_.md_port, fix_ ? "FIX 4.4" : "OUCH/SoupBinTCP", c_.exchange.c_str(),
+                    fix_ ? c_.fix_port : c_.oe_port, c_.threshold, c_.qty);
         std::fflush(stdout);
 
         std::vector<std::uint8_t> bufs(kBatch * 2048);
@@ -150,8 +161,15 @@ public:
         // Final OUCH replies, then log out.
         const std::uint64_t drain_end = net::mono_ns() + kSecond / 2;
         while (net::mono_ns() < drain_end) service_order_entry(net::mono_ns());
-        std::uint8_t bye[soup::kHeaderLen];
-        oe_->send(bye, soup::put_empty(bye, soup::kLogoutRequest));
+        if (fix_) {
+            fix_session_->set_logout_sent();
+            const auto m = fix_session_->logout(net::epoch_ns());
+            fix_conn_->send(m.first, m.second);
+            fix_conn_->flush();
+        } else {
+            std::uint8_t bye[soup::kHeaderLen];
+            oe_->send(bye, soup::put_empty(bye, soup::kLogoutRequest));
+        }
         if (absorb >= 0) close(absorb);
         report();
         return ended_ ? 0 : 1;
@@ -170,6 +188,33 @@ public:
         filled_shares_ += e.qty;
     }
     void on_rejected(const ouch::Rejected&) { ++rejected_; }
+
+    // ---- FIX application messages (fix::Session) ----
+    void on_app(const fix::Message& m) {
+        if (m.type() == '9') {
+            ++rejected_;
+            return;
+        }
+        if (m.type() != '8') return;
+        switch (m.get(fix::tag::ExecType)[0]) {
+            case '0': {
+                ++accepted_;
+                const auto it = fix_sent_.find(fix::parse_uint(m.get(fix::tag::ClOrdID).substr(1)));
+                if (it != fix_sent_.end()) {
+                    rtt_.add(net::mono_ns() - it->second);
+                    fix_sent_.erase(it);
+                }
+                break;
+            }
+            case 'F':
+                ++fills_;
+                filled_shares_ += m.get_uint(fix::tag::LastQty);
+                break;
+            case '4': ++canceled_; break;
+            case '8': ++rejected_; break;
+            default: break;
+        }
+    }
 
 private:
     // ITCH events -> book -> rule
@@ -198,6 +243,10 @@ private:
         const L3Book::Instrument* in = book_->instrument(e.symbol);
         if (!in || in->asks.empty() || !oe_logged_in_) return;
         const auto ask4 = static_cast<std::uint64_t>(in->asks.best().price / itch::kPriceMul);
+        if (fix_) {
+            send_fix_order(e, ask4);
+            return;
+        }
 
         // Build the SoupBinTCP + OUCH Enter Order in place and send it.
         ouch::EnterOrder o{};
@@ -222,7 +271,38 @@ private:
         ++orders_;
     }
 
+    // NewOrderSingle: limit IOC buy at the best ask; ClOrdID carries the trigger's
+    // ITCH sequence number, as the OUCH path does.
+    void send_fix_order(const BookEvent& e, std::uint64_t ask4) {
+        const std::uint64_t trigger = filler_.current_sequence();
+        char clordid[24];
+        const int n = std::snprintf(clordid, sizeof clordid, "T%llu", (unsigned long long)trigger);
+        const std::string_view symbol = dec_.symbol_name(e.symbol);
+        const std::uint64_t now = net::epoch_ns();
+        const auto m = fix_session_->build('D', now, [&](fix::Encoder& enc) {
+            enc.field(fix::tag::ClOrdID, std::string_view(clordid, static_cast<std::size_t>(n)));
+            enc.field(fix::tag::Symbol, symbol.substr(0, symbol.find_last_not_of(' ') + 1));
+            enc.field_char(fix::tag::Side, '1');
+            enc.field_uint(fix::tag::OrderQty, c_.qty);
+            enc.field_char(fix::tag::OrdType, '2');
+            enc.field_price(fix::tag::Price, ask4);
+            enc.field_char(fix::tag::TimeInForce, '3');
+            enc.field_time(fix::tag::TransactTime, now);
+        });
+        const std::uint64_t t0 = net::mono_ns();
+        fix_conn_->send(m.first, m.second);
+        const std::uint64_t t1 = net::mono_ns();
+        t2t_.add(t0 - rx_ns_);
+        t2t_send_.add(t1 - rx_ns_);
+        fix_sent_[trigger] = t1;
+        ++orders_;
+    }
+
     void service_order_entry(std::uint64_t now) {
+        if (fix_) {
+            service_fix(now);
+            return;
+        }
         if (!oe_->read()) {
             if (oe_->open()) std::fprintf(stderr, "trader: order entry connection closed\n");
             oe_->close();
@@ -239,6 +319,22 @@ private:
             std::uint8_t hb[soup::kHeaderLen];
             oe_->send(hb, soup::put_empty(hb, soup::kClientHeartbeat));
         }
+    }
+
+    void service_fix(std::uint64_t now) {
+        auto out = [&](const std::uint8_t* p, std::size_t n) { fix_conn_->send(p, n); };
+        if (!fix_conn_->read()) {
+            if (fix_conn_->open()) std::fprintf(stderr, "trader: FIX connection closed\n");
+            fix_conn_->close();
+            return;
+        }
+        fix_conn_->in().drain([&](const std::uint8_t* p, std::size_t n) {
+            fix_session_->on_message(p, n, net::epoch_ns(), *this, out);
+            return true;
+        });
+        oe_logged_in_ = fix_session_->logged_on();
+        fix_conn_->flush();
+        fix_session_->tick(net::epoch_ns(), net::epoch_ns() - (now - fix_conn_->last_tx_ns), out);
     }
 
     // Opens a SoupBinTCP replay from the first missing message while the
@@ -297,6 +393,10 @@ private:
     mold::GapFiller<Feed> filler_;
     int md_fd_ = -1;
     std::unique_ptr<net::Conn> oe_, rec_;
+    bool fix_ = c_.oe == "fix";
+    std::unique_ptr<net::FixConn> fix_conn_;
+    std::unique_ptr<fix::Session> fix_session_;
+    std::unordered_map<std::uint64_t, std::uint64_t> fix_sent_;   // trigger seq -> send time
     bool oe_logged_in_ = false, ended_ = false;
     std::uint64_t rec_seq_ = 0, rx_ns_ = 0;
     std::uint32_t user_ref_ = 0;
@@ -326,6 +426,8 @@ int main(int argc, char** argv) {
         else if (a == "--qty") c.qty = static_cast<std::uint32_t>(std::atoi(next().c_str()));
         else if (a == "--cpu") c.cpu = std::atoi(next().c_str());
         else if (a == "--user") c.user = next();
+        else if (a == "--oe") c.oe = next();
+        else if (a == "--fix-port") c.fix_port = static_cast<std::uint16_t>(std::atoi(next().c_str()));
         else if (a == "--timeout") c.timeout_s = std::atof(next().c_str());
         else {
             std::fprintf(stderr, "unknown option %s\n", a.c_str());

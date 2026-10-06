@@ -1,0 +1,80 @@
+# WSL2 loopback, exchange_sim pinned to core 2, trader to core 3, 3 s at 100k events/s
+
+=== order entry: ouch
+exchange_sim: ITCH/MoldUDP64 -> 127.0.0.1:31007, OUCH/SoupBinTCP :31100, FIX 4.4 :31102, recovery :31101, 8 symbols
+exchange_sim: 3.0 s, 262897 ITCH messages in 45786 packets (0 withheld by --drop), 0 replayed over TCP
+  orders: 2997 in (2997 OUCH, 0 FIX), 157597 accepted (incl. house), 0 rejected, 86236 executions, 2999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=2997    p50     4.46  p90     8.04  p99    55.53  p99.9   136.11  max   248.41 us
+book hash ffd7aaada1635acf (L3 book rebuilt from the published ITCH)
+
+trader: recvmmsg market data on :31007, OUCH/SoupBinTCP to 127.0.0.1:31100 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 45789 packets (0 duplicate, 0 malformed), messages: 262897 live + 0 buffered + 0 recovered over TCP (0 gaps, 0 recovery sessions)
+  signals 2999 (0 skipped while catching up), orders 2997, accepted 2997, fills 2997 (299700 shares), IOC cancels 0, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=2997    p50     0.30  p90     0.69  p99     2.78  p99.9    51.93  max   141.77 us
+  tick-to-trade (rx -> send returned) n=2997    p50     1.99  p90     3.38  p99    14.30  p99.9    53.92  max   149.50 us
+  order RTT (send -> Accepted)       n=2997    p50     5.86  p90     9.23  p99    44.29  p99.9   119.01  max   298.12 us
+book hash ffd7aaada1635acf (L3 book rebuilt from ITCH, complete)
+
+OK: books match (ffd7aaada1635acf), 2997 fills
+
+=== order entry: fix
+exchange_sim: ITCH/MoldUDP64 -> 127.0.0.1:31007, OUCH/SoupBinTCP :31100, FIX 4.4 :31102, recovery :31101, 8 symbols
+exchange_sim: 3.0 s, 262943 ITCH messages in 45574 packets (0 withheld by --drop), 0 replayed over TCP
+  orders: 2997 in (0 OUCH, 2997 FIX), 157469 accepted (incl. house), 0 rejected, 86078 executions, 2999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=2997    p50     4.46  p90     9.81  p99    62.23  p99.9  2011.25  max  3390.54 us
+book hash 5093dc9dda8e618d (L3 book rebuilt from the published ITCH)
+
+trader: recvmmsg market data on :31007, FIX 4.4 to 127.0.0.1:31102 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 45574 packets (0 duplicate, 0 malformed), messages: 262943 live + 0 buffered + 0 recovered over TCP (0 gaps, 0 recovery sessions)
+  signals 2999 (0 skipped while catching up), orders 2997, accepted 2997, fills 2994 (299400 shares), IOC cancels 3, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=2997    p50     0.50  p90     1.88  p99     6.05  p99.9    35.38  max    58.08 us
+  tick-to-trade (rx -> send returned) n=2997    p50     2.28  p90     5.15  p99    15.76  p99.9    43.70  max    60.26 us
+  order RTT (send -> Accepted)       n=2997    p50     6.74  p90    10.80  p99    54.02  p99.9   265.47  max   525.01 us
+book hash 5093dc9dda8e618d (L3 book rebuilt from ITCH, complete)
+
+OK: books match (5093dc9dda8e618d), 2994 fills
+
+##### second run
+# WSL2 loopback, exchange_sim pinned to core 2, trader to core 3, 3 s at 100k events/s
+
+=== order entry: ouch
+exchange_sim: ITCH/MoldUDP64 -> 127.0.0.1:31007, OUCH/SoupBinTCP :31100, FIX 4.4 :31102, recovery :31101, 8 symbols
+exchange_sim: 3.0 s, 262591 ITCH messages in 45938 packets (0 withheld by --drop), 0 replayed over TCP
+  orders: 2998 in (2998 OUCH, 0 FIX), 157342 accepted (incl. house), 0 rejected, 85572 executions, 2999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=2998    p50     4.54  p90    10.12  p99    64.98  p99.9  1306.32  max  1483.74 us
+book hash 4d7185be6f0696b3 (L3 book rebuilt from the published ITCH)
+
+trader: recvmmsg market data on :31007, OUCH/SoupBinTCP to 127.0.0.1:31100 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 45938 packets (0 duplicate, 0 malformed), messages: 262591 live + 0 buffered + 0 recovered over TCP (0 gaps, 0 recovery sessions)
+  signals 2999 (0 skipped while catching up), orders 2998, accepted 2998, fills 2995 (299500 shares), IOC cancels 3, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=2998    p50     0.31  p90     0.79  p99     3.57  p99.9    33.10  max   102.28 us
+  tick-to-trade (rx -> send returned) n=2998    p50     2.05  p90     4.74  p99    18.39  p99.9   106.06  max   192.30 us
+  order RTT (send -> Accepted)       n=2998    p50     6.19  p90    10.47  p99    44.45  p99.9   233.88  max  1291.81 us
+book hash 4d7185be6f0696b3 (L3 book rebuilt from ITCH, complete)
+
+OK: books match (4d7185be6f0696b3), 2995 fills
+
+=== order entry: fix
+exchange_sim: ITCH/MoldUDP64 -> 127.0.0.1:31007, OUCH/SoupBinTCP :31100, FIX 4.4 :31102, recovery :31101, 8 symbols
+exchange_sim: 3.0 s, 262439 ITCH messages in 45392 packets (0 withheld by --drop), 0 replayed over TCP
+  orders: 2998 in (0 OUCH, 2998 FIX), 157309 accepted (incl. house), 0 rejected, 86050 executions, 2999 triggers sent
+  exchange-observed reaction (trigger packet sendto -> order recv, both on this host's clock):
+  trigger -> order at exchange       n=2998    p50     4.65  p90    15.52  p99  1155.02  p99.9  5742.84  max  5835.26 us
+book hash 06551b3cc5563c8f (L3 book rebuilt from the published ITCH)
+
+trader: recvmmsg market data on :31007, FIX 4.4 to 127.0.0.1:31102 (rule: bid >= 5000 shares -> buy 100 IOC at best ask)
+trader: 45392 packets (0 duplicate, 0 malformed), messages: 262439 live + 0 buffered + 0 recovered over TCP (0 gaps, 0 recovery sessions)
+  signals 2999 (0 skipped while catching up), orders 2998, accepted 2998, fills 2995 (299500 shares), IOC cancels 3, rejects 0
+  latency on this host:
+  tick-to-trade (rx -> send call)    n=2998    p50     0.51  p90     2.54  p99    20.64  p99.9   189.51  max   471.86 us
+  tick-to-trade (rx -> send returned) n=2998    p50     2.33  p90     7.69  p99    54.22  p99.9   208.59  max   497.63 us
+  order RTT (send -> Accepted)       n=2998    p50     7.38  p90    19.12  p99   957.43  p99.9  2722.15  max  4998.49 us
+book hash 06551b3cc5563c8f (L3 book rebuilt from ITCH, complete)
+
+OK: books match (06551b3cc5563c8f), 2995 fills

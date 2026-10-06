@@ -3,13 +3,14 @@
 # Fails unless the trader finished the session, traded, and rebuilt exactly
 # the book the exchange published (same L3 book hash).
 #
-#   tools/t2t_local.sh [build dir]       env: DUR=3 DROP=0 RATE=100000 EX_CPU= TR_CPU=
+#   tools/t2t_local.sh [build dir]       env: DUR=3 DROP=0 RATE=100000 OE=ouch|fix EX_CPU= TR_CPU=
 #   DROP=20 withholds every 20th UDP packet, so the trader must recover over TCP.
 set -e
 B=${1:-build}
 DUR=${DUR:-3}
 DROP=${DROP:-0}
 RATE=${RATE:-100000}
+OE=${OE:-ouch}
 LOG=${LOG:-$B}
 EX_CPU=${EX_CPU:+--cpu $EX_CPU}
 TR_CPU=${TR_CPU:+--cpu $TR_CPU}
@@ -18,7 +19,7 @@ TR_CPU=${TR_CPU:+--cpu $TR_CPU}
 EX=$!
 sleep 0.5
 set +e
-"$B/trader" --timeout 60 $TR_CPU > "$LOG/trader.log" 2>&1
+"$B/trader" --timeout 60 --oe "$OE" $TR_CPU > "$LOG/trader.log" 2>&1
 TR_RC=$?
 wait $EX
 EX_RC=$?

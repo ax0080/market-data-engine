@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "mde/fix44.h"
 #include "mde/soupbintcp.h"
 
 namespace mde::net {
@@ -30,6 +31,11 @@ namespace mde::net {
 inline std::uint64_t mono_ns() {
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    return std::uint64_t(ts.tv_sec) * 1'000'000'000u + std::uint64_t(ts.tv_nsec);
+}
+inline std::uint64_t epoch_ns() {   // FIX SendingTime / TransactTime
+    timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
     return std::uint64_t(ts.tv_sec) * 1'000'000'000u + std::uint64_t(ts.tv_nsec);
 }
 inline std::uint64_t ns_since_midnight() {   // ITCH / OUCH timestamps (UTC midnight)
@@ -116,20 +122,22 @@ inline int udp_receiver(std::uint16_t port, const std::string& group = "") {
     return fd;
 }
 
-// One SoupBinTCP connection: reassembles inbound packets, and queues outbound
-// bytes only when the socket would block (the common case is one send()).
-class Conn {
+// One TCP connection: reassembles inbound messages with Framer (SoupBinTCP or
+// FIX), and queues outbound bytes only when the socket would block (the common
+// case is one send()).
+template <class Framer>
+class BasicConn {
 public:
-    explicit Conn(int fd) : fd_(fd) {}
-    Conn(Conn&& o) noexcept : fd_(o.fd_), in_(std::move(o.in_)), out_(std::move(o.out_)) { o.fd_ = -1; }
-    Conn& operator=(Conn&& o) noexcept {
+    explicit BasicConn(int fd) : fd_(fd) {}
+    BasicConn(BasicConn&& o) noexcept : fd_(o.fd_), in_(std::move(o.in_)), out_(std::move(o.out_)) { o.fd_ = -1; }
+    BasicConn& operator=(BasicConn&& o) noexcept {
         std::swap(fd_, o.fd_);
         std::swap(in_, o.in_);
         std::swap(out_, o.out_);
         return *this;
     }
-    Conn(const Conn&) = delete;
-    ~Conn() { close(); }
+    BasicConn(const BasicConn&) = delete;
+    ~BasicConn() { close(); }
 
     int fd() const { return fd_; }
     bool open() const { return fd_ >= 0; }
@@ -153,7 +161,7 @@ public:
             return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
         }
     }
-    soup::Framer& in() { return in_; }
+    Framer& in() { return in_; }
 
     // Sends now if nothing is queued, else queues. Returns false on a dead socket.
     bool send(const std::uint8_t* p, std::size_t n) {
@@ -193,9 +201,11 @@ private:
     }
 
     int fd_ = -1;
-    soup::Framer in_;
+    Framer in_;
     std::vector<std::uint8_t> out_;
 };
+using Conn = BasicConn<soup::Framer>;
+using FixConn = BasicConn<fix::Framer>;
 
 // Latency samples -> percentiles.
 struct Samples {

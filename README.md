@@ -2,7 +2,7 @@
 
 A C++20 market-data feed handler that decodes **NASDAQ TotalView-ITCH 5.0**, **Binance** and **Coinbase** order-book feeds into one venue-neutral event stream and rebuilds the order book: order-by-order (L3) for ITCH, price-level (L2) for the crypto venues.
 
-It also covers the trading side of the NASDAQ protocol stack: **UDP market data with TCP gap recovery** (MoldUDP64 + SoupBinTCP), **OUCH 5.0 order entry**, and an exchange simulator around the [orderbook-engine](https://github.com/ax0080/orderbook-engine) matching engine, so the full tick-to-trade path (packet in, book update, decision, order out) runs and is measured between two cloud VMs.
+It also covers the trading side of the NASDAQ protocol stack: **UDP market data with TCP gap recovery** (MoldUDP64 + SoupBinTCP), order entry in both **OUCH 5.0** (NASDAQ's binary protocol) and **FIX 4.4** (the industry standard), and an exchange simulator around the [orderbook-engine](https://github.com/ax0080/orderbook-engine) matching engine, so the full tick-to-trade path (packet in, book update, decision, order out) runs and is measured between two cloud VMs.
 
 Companion projects: a [matching engine](https://github.com/ax0080/orderbook-engine) and a [backtest engine](https://github.com/ax0080/backtest-engine).
 
@@ -18,7 +18,8 @@ Companion projects: a [matching engine](https://github.com/ax0080/orderbook-engi
  ──────────────────────────────────────────                    ─────────────────────────────────────
  UDP  ITCH/MoldUDP64 ─► GapFiller ─► ITCH ─► L3 book ─► rule ◄── ITCH publisher ◄─┐
  TCP  SoupBinTCP replay ──┘ (only while a gap is open)        ◄── replay log       ├─ orderbook-engine
- TCP  OUCH 5.0 order ─────────────────────────────────────────►  OUCH gateway ─────┘   (matching)
+ TCP  OUCH 5.0 or FIX 4.4 order ──────────────────────────────►  OUCH gateway ─────┘   (matching)
+                                                                  FIX 4.4 gateway ──┘
 ```
 
 ## Results
@@ -34,6 +35,8 @@ Intel Core i5-12600K, Windows 10, g++ 15.2 `-O3 -march=native`, one thread. Timi
 | Coinbase BTC-USD, ETH-USD | 29 min live level2 stream each (~30 k messages) | sequence continuity, book never crossed | 0 gaps, 0 crossed states |
 | UDP feed with TCP gap recovery | exchange simulator, 1.6 M ITCH messages per 20 s run, every 50th UDP packet withheld | trader's L3 book vs the book the exchange published (hash of every level) | **~6,000 gaps per run, all filled over SoupBinTCP; books identical** (two GCP VMs and CI loopback) |
 | Exchange gateway | 20,000 random OUCH enter / replace / cancel and house orders against the real matching engine | after every operation: L3 book rebuilt from the published ITCH vs the engine's book; each client's open quantity from OUCH replies vs the engine | **identical at every step** |
+| FIX order entry | 20,000 random NewOrderSingle / OrderCancelRequest / OrderCancelReplaceRequest from three FIX clients plus house flow | after every operation: every request answered (ExecutionReport or OrderCancelReject); each client's LeavesQty per ClOrdID, rebuilt only from ExecutionReports, vs the engine; ITCH book vs the engine | **identical at every step** |
+| FIX session | messages lost in flight, then recovered | ResendRequest, PossDupFlag resend, SequenceReset-GapFill over admin messages | **every application message delivered once, in order** |
 
 ### Performance
 
@@ -103,6 +106,25 @@ The same two-VM setup (`n2-standard-4`, gVNIC, one RX queue on the trader, each 
 
 On WSL2 loopback, where both programs share one machine, tick-to-trade in the trader is 0.29-0.30 µs p50, and trigger -> order at the exchange is 3.6-4.1 µs p50.
 
+### Order entry: OUCH vs FIX
+
+The same order flow through both protocols. Codec cost on one core ([`bench/oe_codec.txt`](bench/oe_codec.txt), i5-12600K, WSL2, two runs; a Windows run gives the same picture):
+
+| ns per message | OUCH 5.0 | FIX 4.4 | FIX / OUCH |
+|---|---|---|---|
+| new order: encode (client) | 1.5 | 48-49 | ~32x |
+| new order: decode (exchange) | 2.7 | 83-89 | ~32x |
+| execution report: encode (exchange) | 1.2 | 63-66 | ~54x |
+| execution report: decode (client) | 1.2 | 115-124 | ~100x |
+| **all four** | **6.5-6.6** | **312-325** | **~48x** |
+| bytes on the wire: new order / execution report | 50 / 39 | 156 / 215 | |
+
+End to end on WSL2 loopback (both programs pinned, [`bench/t2t_loopback_ouch_vs_fix.txt`](bench/t2t_loopback_ouch_vs_fix.txt), two runs), tick-to-trade in the trader is **0.30-0.31 µs p50 with OUCH and 0.50-0.51 µs with FIX**. Both rebuilt exactly the exchange's book, with and without packet loss.
+
+- **Why FIX costs more.** OUCH fields sit at fixed offsets as binary integers: encoding is a few stores, decoding a few loads. FIX is text: every integer and price is printed and parsed digit by digit, every message carries two formatted UTC timestamps (SendingTime, TransactTime), the receiver must scan for delimiters to find any field, and the checksum covers every byte. The messages are also 3-5x larger.
+- **One fix measured on the way.** The FIX session keeps every application message it sends, for resend. Storing each one in its own `std::vector` put a heap allocation on the order path; appending them to one pre-reserved log instead cut FIX tick-to-trade from 0.69 to 0.50 µs p50.
+- **Decode is a single pass.** `fix::scan` walks the message once and a `switch` on the tag picks out the fields, which is how FIX engines read. Splitting into fields first and then looking each one up by tag is about 10 ns slower per message (both are in the benchmark).
+
 ### File replay: fread vs mmap
 
 | Full ITCH day, decode only, warm page cache | fread (256 MB chunks) | mmap |
@@ -133,9 +155,13 @@ Memory-mapping removes the kernel-to-user copy, and the file becomes one contigu
 
 **OUCH 5.0.** Field offsets follow NASDAQ's specification (big-endian binary, 8-byte prices with 4 implied decimals, space-padded alpha fields), and the tests check the layout byte by byte. Orders are named by the client's UserRefNum, which must strictly increase, so a resent message is recognised and ignored; Replace re-states the total quantity liable for the whole order chain, and Cancel gives the new intended order size (0 cancels; the simulator treats it as the new open quantity).
 
+**FIX 4.4.** `fix44.h` has the codec, a stream framer and the session layer, with the same rules as the binary paths: no allocation per message and values read in place. The encoder writes the body first and puts `8=FIX.4.4|9=<length>|` in front once the length is known, then appends the checksum. The framer uses BodyLength to cut messages out of the TCP stream, drops any whose checksum does not match and resynchronises on the next `8=FIX`. The session numbers messages in both directions: a message ahead of the next expected number triggers a ResendRequest, and the peer resends its application messages with PossDupFlag=Y and their original SendingTime, replacing runs of admin messages with one SequenceReset-GapFill. Prices travel as decimal text and are converted straight to integers with 4 implied decimals, so no floating point is involved.
+
+**FIX gateway.** `sim/fix_order_entry.h` puts FIX in front of the OUCH gateway, the way venues often run a FIX gateway beside their native protocol: NewOrderSingle, OrderCancelRequest and OrderCancelReplaceRequest become OUCH Enter, Cancel and Replace; every OUCH reply becomes an ExecutionReport with the running CumQty, LeavesQty and AvgPx, or an OrderCancelReject. OUCH names orders by a number and reports quantities per event, so this layer keeps the per-order state FIX needs (ClOrdID chains through replaces, cumulative fills). The gateway answers synchronously, so a cancel or replace that got no answer at all (the order was no longer live) is detected right after the call and rejected.
+
 **Exchange gateway.** `sim/gateway.h` puts the matching engine behind both protocols. Every book change becomes an ITCH message for everyone and an OUCH reply for the order's owner. ITCH only shows resting orders: an order that trades on arrival produces Executed messages against the orders it hit and an Add Order for whatever rests; a reprice is published as Delete + Add under a new reference, and a size reduction as a Cancel that keeps priority. The engine reports events after each operation finishes, so anything the OUCH reply must state as of a replace (the quantity outstanding at that moment) is captured before the call.
 
-**Tick to trade on one core.** The trader busy-polls the UDP socket (or the AF_XDP ring) and decides inside the decode callback: on a signal it builds the SoupBinTCP + OUCH order in a stack buffer and calls `send()` on a `TCP_NODELAY` socket, with no queue or thread hop. Order-entry and recovery sockets are polled every 16th iteration, since they are not on the hot path.
+**Tick to trade on one core.** The trader busy-polls the UDP socket (or the AF_XDP ring) and decides inside the decode callback: on a signal it builds the SoupBinTCP + OUCH order (or the FIX NewOrderSingle) and calls `send()` on a `TCP_NODELAY` socket, with no queue or thread hop. Order-entry and recovery sockets are polled every 16th iteration, since they are not on the hot path.
 
 ## Build and run
 
@@ -147,9 +173,11 @@ cmake -S . -B build -G Ninja && cmake --build build   # fetches orderbook-engine
 # tick to trade on one Linux host: exchange_sim + trader, checks the trader's book equals the exchange's
 sh tools/t2t_local.sh build
 DROP=20 sh tools/t2t_local.sh build                    # withhold every 20th UDP packet: TCP gap recovery
+OE=fix sh tools/t2t_local.sh build                     # the same with FIX 4.4 order entry
+./build/oe_codec_bench                                 # OUCH vs FIX encode / decode cost
 # two hosts: exchange first, then the trader (add --rx xdp [--native --zc] and sudo for AF_XDP)
 ./build/exchange_sim --md-dest <trader ip> --duration 20
-./build/trader --exchange <exchange ip> --rx recvmmsg
+./build/trader --exchange <exchange ip> --rx recvmmsg   # --oe fix for FIX order entry
 # the GCP runs above
 sh tools/gcp_t2t_bench.sh <exchange public ip> <exchange internal ip> <trader public ip> <trader internal ip> bench/gcp/t2t.log
 
@@ -184,8 +212,10 @@ python3 tools/make_synthetic_itch.py synthetic.itch 2000000
 include/mde/   types.h  itch50.h  moldudp64.h  binance.h  coinbase.h  json_scan.h
                order_table.h  l3_book.h  price_levels.h  tick_levels.h  l2_book.h
                mapped_file.h  af_xdp.h
-               wire.h  soupbintcp.h  ouch50.h  itch50_writer.h  gap_filler.h  book_hash.h  linux_net.h
-sim/           gateway.h (matching engine -> ITCH + OUCH)  exchange_sim.cpp
-tools/         replay_itch.cpp  replay_crypto.cpp  udp_bench.cpp  trader.cpp  record_ws.py  make_synthetic_itch.py
-tests/         check.h (tiny harness)  test_books.cpp  test_feeds.cpp  test_order_entry.cpp  test_gateway.cpp
+               wire.h  soupbintcp.h  ouch50.h  fix44.h  itch50_writer.h  gap_filler.h  book_hash.h  linux_net.h
+sim/           gateway.h (matching engine -> ITCH + OUCH)  fix_order_entry.h (FIX -> OUCH)  exchange_sim.cpp
+tools/         replay_itch.cpp  replay_crypto.cpp  udp_bench.cpp  trader.cpp  oe_codec_bench.cpp  record_ws.py
+               make_synthetic_itch.py
+tests/         check.h (tiny harness)  test_books.cpp  test_feeds.cpp  test_order_entry.cpp  test_fix.cpp
+               test_gateway.cpp  test_fix_gateway.cpp
 ```

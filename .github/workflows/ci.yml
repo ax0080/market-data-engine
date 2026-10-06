@@ -33,8 +33,10 @@ jobs:
           python3 tools/make_synthetic_itch.py build/synthetic.itch 200000
           ./build/udp_bench local build/synthetic.itch 200000 recvmmsg 100000
           sudo ./build/udp_bench local build/synthetic.itch 200000 xdp 100000 --unicast
-      - name: Tick-to-trade loopback (exchange_sim + trader, lossless and with TCP gap recovery)
+      - name: Tick-to-trade loopback (OUCH and FIX order entry, lossless and with TCP gap recovery)
         if: matrix.config != 'scatter-hash'
         run: |
           sh tools/t2t_local.sh build
           DROP=20 sh tools/t2t_local.sh build
+          OE=fix sh tools/t2t_local.sh build
+          OE=fix DROP=20 sh tools/t2t_local.sh build
