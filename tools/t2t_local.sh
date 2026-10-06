@@ -32,8 +32,19 @@ ex_hash=$(sed -n 's/^book hash \([0-9a-f]*\).*/\1/p' "$LOG/exchange.log")
 tr_hash=$(sed -n 's/^book hash \([0-9a-f]*\).*/\1/p' "$LOG/trader.log")
 fills=$(sed -n 's/.*fills \([0-9]*\).*/\1/p' "$LOG/trader.log")
 echo
-if [ "$TR_RC" -ne 0 ] || [ "$EX_RC" -ne 0 ]; then echo "FAIL: exit codes trader=$TR_RC exchange=$EX_RC"; exit 1; fi
-if [ -z "$ex_hash" ] || [ "$ex_hash" != "$tr_hash" ]; then echo "FAIL: book hash exchange=$ex_hash trader=$tr_hash"; exit 1; fi
-if [ "${fills:-0}" -eq 0 ]; then echo "FAIL: no fills"; exit 1; fi
-if [ "$DROP" -gt 0 ] && ! grep -q "recovered over TCP" "$LOG/trader.log"; then echo "FAIL: no recovery"; exit 1; fi
+
+# On failure: say why, and in GitHub Actions also raise an annotation with the
+# tail of both logs (annotations are readable without signing in).
+fail() {
+  echo "FAIL: $1"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    body=$( { echo "$1 (OE=$OE DROP=$DROP)"; echo "--- trader"; tail -n 25 "$LOG/trader.log";               echo "--- exchange"; tail -n 25 "$LOG/exchange.log"; } | cut -c1-240 | awk '{ printf "%s%%0A", $0 }')
+    echo "::error title=t2t_local OE=$OE DROP=$DROP::$body"
+  fi
+  exit 1
+}
+if [ "$TR_RC" -ne 0 ] || [ "$EX_RC" -ne 0 ]; then fail "exit codes trader=$TR_RC exchange=$EX_RC"; fi
+if [ -z "$ex_hash" ] || [ "$ex_hash" != "$tr_hash" ]; then fail "book hash exchange=$ex_hash trader=$tr_hash"; fi
+if [ "${fills:-0}" -eq 0 ]; then fail "no fills"; fi
+if [ "$DROP" -gt 0 ] && ! grep -q "recovered over TCP" "$LOG/trader.log"; then fail "no recovery"; fi
 echo "OK: books match ($tr_hash), $fills fills"
