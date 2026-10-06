@@ -173,6 +173,7 @@ public:
             }
             service(now);
         }
+        gw_.close();   // orders still in flight are rejected: the book is final at End of Messages
         gw_.system_event(itch::kEndOfMessages);
         flush_md();
         // End of Session carries the final sequence number, so a trader that lost

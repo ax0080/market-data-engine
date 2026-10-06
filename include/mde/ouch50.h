@@ -46,6 +46,7 @@ inline constexpr char kCancelUser = 'U';
 inline constexpr char kCancelIoc = 'I';
 inline constexpr char kCancelSelfMatch = 'Q';
 // Reject reasons (subset)
+inline constexpr std::uint16_t kRejectDestinationClosed = 0x0002;
 inline constexpr std::uint16_t kRejectOther = 0x000F;
 inline constexpr std::uint16_t kRejectInvalidQuantity = 0x0013;
 inline constexpr std::uint16_t kRejectInvalidSymbol = 0x0017;

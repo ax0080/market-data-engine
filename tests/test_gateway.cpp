@@ -183,3 +183,31 @@ TEST(gateway_itch_and_ouch_stay_consistent_with_engine) {
     CHECK(rejects > 0);    // and the reject paths ran
     CHECK(gw.stats().ignored > 0);
 }
+
+TEST(gateway_rejects_orders_after_close) {
+    TestOut out;
+    Gw gw(out);
+    const auto loc = gw.add_symbol("AAPL");
+    gw.house_limit(loc, 'S', 1'000'000, 500);   // resting ask
+    ouch::EnterOrder o{};
+    o.user_ref = 1;
+    o.side = 'B';
+    o.qty = 100;
+    o.symbol = "AAPL";
+    o.price = 1'000'000;
+    o.clordid = "C";
+    gw.enter(0, o);   // trades before the close
+    CHECK_EQ(out.clients[0].executions, 1);
+
+    gw.close();
+    const auto itch_before = out.dec.stats().messages;
+    o.user_ref = 2;
+    gw.enter(0, o);                                      // would trade: rejected instead
+    gw.cancel(0, ouch::CancelOrder{1, 0});               // ignored
+    CHECK_EQ(out.clients[0].rejects, 1);
+    CHECK_EQ(out.clients[0].executions, 1);
+    CHECK_EQ(out.dec.stats().messages, itch_before);     // nothing more on the public feed
+    const exchange::Order* ask = gw.book(loc)->find(1);   // the house ask: 400 left, untouched by the close
+    CHECK(ask != nullptr);
+    if (ask) CHECK_EQ(ask->remaining(), 400);
+}

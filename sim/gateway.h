@@ -61,6 +61,12 @@ public:
         md(m, itch::put_stock_directory(m, locate, out_.now_ns(), name));
         return locate;
     }
+    // After the close the book is frozen: new orders and replaces are rejected
+    // (Destination Closed) and cancels ignored, so nothing reaches the public
+    // feed after End of Messages.
+    void close() { closed_ = true; }
+    bool closed() const { return closed_; }
+
     void system_event(char code) {
         std::uint8_t m[itch::kSystemEventLen];
         md(m, itch::put_system_event(m, out_.now_ns(), code));
@@ -78,7 +84,8 @@ public:
         ss.last_user_ref = o.user_ref;
         const std::uint16_t locate = lookup(o.symbol);
         std::uint16_t reason = 0;
-        if (!locate) reason = ouch::kRejectInvalidSymbol;
+        if (closed_) reason = ouch::kRejectDestinationClosed;
+        else if (!locate) reason = ouch::kRejectInvalidSymbol;
         else if (o.qty == 0 || o.qty >= 1'000'000) reason = ouch::kRejectInvalidQuantity;
         else if (o.price == 0 || o.price > kMaxPrice) reason = ouch::kRejectInvalidPrice;
         else if (o.side != 'B' && o.side != 'S' && o.side != 'T' && o.side != 'E') reason = ouch::kRejectOther;
@@ -110,6 +117,10 @@ public:
             return;
         }
         ss.last_user_ref = o.user_ref;
+        if (closed_) {
+            reject(s, o.user_ref, ouch::kRejectDestinationClosed, o.clordid);
+            return;
+        }
         const exchange::OrderId id = it->second;
         OrderInfo& info = orders_.at(id);
         if (o.price == 0 || o.price > kMaxPrice || o.qty >= 1'000'000 || o.qty <= order->filled_quantity) {
@@ -135,7 +146,7 @@ public:
         Session& ss = session(s);
         const auto it = ss.orders.find(c.user_ref);
         const exchange::Order* order = it == ss.orders.end() ? nullptr : find(it->second);
-        if (!order) {   // superfluous cancels are silently ignored
+        if (!order || closed_) {   // superfluous cancels (and any after the close) are silently ignored
             ++stats_.ignored;
             return;
         }
@@ -379,6 +390,7 @@ private:
     std::string_view clordid_;        // ClOrdID of the OUCH request being handled
     Mod mod_;
     char cancel_reason_ = ouch::kCancelIoc;   // reason for engine-initiated cancels (IOC remainder)
+    bool closed_ = false;
     std::uint64_t next_itch_ref_ = 0;
     std::uint64_t match_ = 0;
     GatewayStats stats_;
