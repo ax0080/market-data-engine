@@ -176,13 +176,15 @@ public:
         gw_.system_event(itch::kEndOfMessages);
         flush_md();
         // End of Session carries the final sequence number, so a trader that lost
-        // the last packets still sees the gap; keep serving recovery afterwards.
+        // the last packets still sees the gap. Keep serving recovery and order entry
+        // until every client has disconnected (up to 60 s): a slow trader (e.g. under
+        // sanitizers) may still be filling gaps when the feed ends.
         std::uint8_t ctl[mold::kHeader];
         for (int i = 0; i < 3; ++i) {
             sendto(md_fd_, ctl, pb_.control(ctl, log_.count() + 1, mold::kEndOfSession), 0,
                    reinterpret_cast<const sockaddr*>(&md_dst_), sizeof md_dst_);
         }
-        const std::uint64_t linger_end = net::mono_ns() + 5 * kSecond;
+        const std::uint64_t linger_end = net::mono_ns() + 60 * kSecond;
         while (net::mono_ns() < linger_end && (!clients_.empty() || !fix_clients_.empty())) service(net::mono_ns());
         report(double(now - t0) / 1e9);
         return 0;
